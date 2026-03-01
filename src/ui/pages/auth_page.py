@@ -10,12 +10,26 @@ from PyQt5.QtWidgets import (
 from PyQt5.QtCore import Qt
 from PyQt5.QtGui import QColor
 from ui.icons import Icons
+from engine.config_manager import ConfigManager
+from engine.environment_manager import EnvironmentManager
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 class AuthPage(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
+        try:
+            self.env_manager = EnvironmentManager()
+        except Exception as e:
+            logger.error(f"EnvironmentManager init failed: {e}")
+            self.env_manager = None
         self._setup_ui()
+        try:
+            self._load_settings()
+        except Exception as e:
+            logger.error(f"Load settings failed: {e}")
 
     def _setup_ui(self):
         # Wrapper layout chứa ScrollArea để nội dung không bị cắt
@@ -54,6 +68,8 @@ class AuthPage(QWidget):
         save_btn.setCursor(Qt.PointingHandCursor)
         save_btn.setFixedHeight(46)
         save_btn.setMinimumWidth(180)
+        save_btn.clicked.connect(self._save_settings)
+        self.save_btn = save_btn
         save_row.addWidget(save_btn)
         layout.addLayout(save_row)
 
@@ -262,49 +278,173 @@ class AuthPage(QWidget):
         if folder:
             self.workspace_input.setText(folder)
 
+    def _load_settings(self):
+        """Load cấu hình từ Database lên UI."""
+        token = ConfigManager.get("telegram_token", "")
+        chat_id = ConfigManager.get("telegram_chat_id", "")
+        workspace = ConfigManager.get("workspace_path", "")
+        sandbox = ConfigManager.get("sandbox_permission", "🔒 Read-only (Chỉ đọc, an toàn tuyệt đối)")
+        
+        # Load Checkboxes
+        auto_start = ConfigManager.get("auto_start", "False") == "True"
+        perm_acc = ConfigManager.get("perm_accessibility", "False") == "True"
+        perm_scr = ConfigManager.get("perm_screenshot", "False") == "True"
+        perm_cam = ConfigManager.get("perm_camera", "False") == "True"
+
+        self.token_input.setText(token)
+        self.user_id_input.setText(chat_id)
+        self.workspace_input.setText(workspace)
+
+        idx = self.sandbox_combo.findText(sandbox)
+        if idx >= 0:
+            self.sandbox_combo.setCurrentIndex(idx)
+            
+        self.auto_start_check.setChecked(auto_start)
+        # Tạm tắt signal để không trigger việc yêu cầu quyền khi vừa mở UI
+        self.perm_accessibility.blockSignals(True)
+        self.perm_screenshot.blockSignals(True)
+        self.perm_camera.blockSignals(True)
+        
+        self.perm_accessibility.setChecked(perm_acc)
+        self.perm_screenshot.setChecked(perm_scr)
+        self.perm_camera.setChecked(perm_cam)
+        
+        self.perm_accessibility.blockSignals(False)
+        self.perm_screenshot.blockSignals(False)
+        self.perm_camera.blockSignals(False)
+
+    def _save_settings(self):
+        """Lưu cấu hình từ UI xuống Database."""
+        token = self.token_input.text().strip()
+        chat_id = self.user_id_input.text().strip()
+        workspace = self.workspace_input.text().strip()
+        sandbox = self.sandbox_combo.currentText()
+        
+        auto_start = str(self.auto_start_check.isChecked())
+        perm_acc = str(self.perm_accessibility.isChecked())
+        perm_scr = str(self.perm_screenshot.isChecked())
+        perm_cam = str(self.perm_camera.isChecked())
+
+        ConfigManager.set("telegram_token", token)
+        ConfigManager.set("telegram_chat_id", chat_id)
+        ConfigManager.set("workspace_path", workspace)
+        ConfigManager.set("sandbox_permission", sandbox)
+        ConfigManager.set("auto_start", auto_start)
+        ConfigManager.set("perm_accessibility", perm_acc)
+        ConfigManager.set("perm_screenshot", perm_scr)
+        ConfigManager.set("perm_camera", perm_cam)
+        
+        # Trigger hệ thống Auto Start
+        self._toggle_auto_start(self.auto_start_check.isChecked())
+
+        logger.info("Settings saved successfully.")
+
+        # Hiệu ứng lưu thành công trên nút
+        self.save_btn.setText("  Đã Lưu ✅")
+        self.save_btn.setEnabled(False)
+        from PyQt5.QtCore import QTimer
+        QTimer.singleShot(2000, self._reset_save_btn)
+
+    def _reset_save_btn(self):
+        """Reset nút Save về trạng thái ban đầu."""
+        self.save_btn.setText("  Lưu Cấu Hình")
+        self.save_btn.setEnabled(True)
+
     def _check_codex_installed(self):
-        """Tự động kiểm tra Codex CLI đã cài chưa khi khởi động."""
-        import subprocess, shutil
-        codex_path = shutil.which("codex")
-        if codex_path:
-            # Đã cài → hiện nút Xác thực
+        """Tự động kiểm tra môi trường và Codex CLI khi khởi động."""
+        if self.env_manager is None:
+            self.codex_status_icon.setText("🔴")
+            self.codex_status_label.setText("Lỗi khởi tạo Environment Manager")
+            self.codex_status_label.setStyleSheet("font-size: 14px; font-weight: 600; color: #EF4444;")
+            self.codex_hint.setText("Không thể kiểm tra môi trường. Vui lòng khởi động lại ứng dụng.")
+            return
+        try:
+            env_status = self.env_manager.check_prerequisites()
+        except Exception as e:
+            logger.error(f"check_prerequisites failed: {e}")
+            self.codex_status_icon.setText("🔴")
+            self.codex_status_label.setText("Lỗi kiểm tra môi trường")
+            self.codex_status_label.setStyleSheet("font-size: 14px; font-weight: 600; color: #EF4444;")
+            self.codex_hint.setText(f"Chi tiết lỗi: {str(e)[:60]}")
+            return
+        
+        if env_status["is_ready"]:
+            # Đã cài đủ đồ chơi → hiện nút Xác thực
             self.codex_status_icon.setText("🟡")
             self.codex_status_label.setText("Đã cài đặt · Chưa xác thực")
             self.codex_status_label.setStyleSheet("font-size: 14px; font-weight: 600; color: #F59E0B;")
             self.codex_verify_btn.setVisible(True)
             self.codex_download_btn.setVisible(False)
-            self.codex_hint.setText("Codex CLI đã được cài đặt. Nhấn xác thực để kiểm tra kết nối tài khoản.")
+            self.codex_hint.setText("Môi trường Python, Node, và Codex CLI đã sẵn sàng. Nhấn xác thực để kiểm tra tài khoản.")
         else:
-            # Chưa cài → hiện nút Tải
+            # Thiếu → hiện nút Tải
             self.codex_status_icon.setText("🔴")
-            self.codex_status_label.setText("Chưa cài đặt Codex CLI")
+            
+            missing = [k for k, v in env_status.items() if v == "MISSING" and k != "is_ready"]
+            if missing:
+                self.codex_status_label.setText(f"Thiếu môi trường: {', '.join(missing)}")
+            else:
+                self.codex_status_label.setText("Chưa cài đặt Codex CLI")
+                
             self.codex_status_label.setStyleSheet("font-size: 14px; font-weight: 600; color: #EF4444;")
             self.codex_download_btn.setVisible(True)
             self.codex_verify_btn.setVisible(False)
-            self.codex_hint.setText("Codex CLI chưa được cài đặt trên thiết bị. "
-                                    "Nhấn \"Tải bộ não AI\" để tải và cài đặt tự động.")
+            
+            hint_txt = "Thiết bị thiếu các thành phần bắt buộc. Nhấn \"Tải bộ não AI\" để cài đặt tự động (Cần cấp quyền Admin)."
+            self.codex_hint.setText(hint_txt)
 
     def _download_codex(self):
-        """Tải và cài đặt Codex CLI. (Logic tải sẽ triển khai sau)"""
+        """Tải và cài đặt Môi trường (nếu thiếu) sau đó tải Codex CLI."""
+        from PyQt5.QtWidgets import QMessageBox
+        
         self.codex_download_btn.setEnabled(False)
-        self.codex_download_btn.setText("  Đang tải...")
-        self.codex_status_label.setText("Đang tải Codex CLI...")
+        self.codex_download_btn.setText("  Đang cài đặt...")
+        self.codex_status_label.setText("Đang cài đặt môi trường và Codex...")
         self.codex_status_label.setStyleSheet("font-size: 14px; font-weight: 600; color: #3B82F6;")
-        self.codex_hint.setText("Đang tải và cài đặt Codex CLI... Vui lòng chờ.")
+        self.codex_hint.setText("Việc này có thể mất vài phút. Vui lòng chờ và cấp quyền Admin/Sudo nếu được yêu cầu.")
 
-        # TODO: Triển khai logic tải và cài đặt Codex CLI
-        # import subprocess
-        # Bước 1: Kiểm tra npm/node đã cài chưa
-        # Bước 2: Chạy npm install -g @openai/codex hoặc tải binary
-        # Bước 3: Verify cài đặt thành công
-        # Bước 4: Gọi self._on_download_complete()
+        # Chạy logic cài đặt trong Bg Worker (Thread) để không treo UI
+        import threading
+        def install_worker():
+            try:
+                env_status = self.env_manager.check_prerequisites()
+                missing = [k for k, v in env_status.items() if v == "MISSING" and k not in ["is_ready", "codex"]]
+                
+                # 1. Cài đặt Python/Node nếu thiếu
+                if missing:
+                    self.env_manager.install_missing_env(missing)
+                
+                # 2. Tải và cài đặt Codex từ API Server
+                import requests
+                api_url = f"{ConfigManager.get('OMNIMIND_API_URL', 'http://localhost:8050')}/api/v1/omnimind/codex/releases"
+                resp = requests.get(api_url, timeout=10)
+                if resp.status_code == 200:
+                    data = resp.json()
+                    platform_key = "darwin" if self.env_manager.os_name == "Darwin" else "win32"
+                    if platform_key in data.get("platforms", {}):
+                        dl_url = data["platforms"][platform_key]["url"]
+                        success = self.env_manager.download_and_install_codex(dl_url)
+                        if success:
+                            # Chạy UI update từ Main Thread
+                            from PyQt5.QtCore import QTimer
+                            QTimer.singleShot(0, self._on_download_complete)
+                        else:
+                            raise Exception("Không giải nén được Codex.")
+                    else:
+                        raise Exception("HĐH không được hỗ trợ Codex.")
+                else:
+                    raise Exception("Không thể gọi API lấy link tải Codex.")
+            except Exception as e:
+                logger.error(f"Install worker error: {e}")
+                from PyQt5.QtCore import QTimer
+                QTimer.singleShot(0, lambda: self._set_codex_error(f"Lỗi: {str(e)[:40]}"))
 
-        # Tạm thời simulate hoàn tất sau 2 giây (demo UI)
-        from PyQt5.QtCore import QTimer
-        QTimer.singleShot(2000, self._on_download_complete)
+        threading.Thread(target=install_worker, daemon=True).start()
 
     def _on_download_complete(self):
         """Callback sau khi tải Codex xong."""
+        self.codex_download_btn.setEnabled(True)
+        self.codex_download_btn.setText("  Tải bộ não AI")
         self.codex_download_btn.setVisible(False)
         self.codex_verify_btn.setVisible(True)
         self.codex_status_icon.setText("🟡")
@@ -370,17 +510,17 @@ class AuthPage(QWidget):
 
         if sys_name == "Darwin":  # macOS
             if perm_type == "accessibility":
-                # Mở Security & Privacy → Accessibility
+                # Mở Security & Privacy -> Accessibility
                 subprocess.Popen([
                     "open", "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"
                 ])
             elif perm_type == "screenshot":
-                # Mở Security & Privacy → Screen Recording
+                # Mở Security & Privacy -> Screen Recording
                 subprocess.Popen([
                     "open", "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture"
                 ])
             elif perm_type == "camera":
-                # Mở Security & Privacy → Camera
+                # Mở Security & Privacy -> Camera
                 subprocess.Popen([
                     "open", "x-apple.systempreferences:com.apple.preference.security?Privacy_Camera"
                 ])
@@ -404,3 +544,71 @@ class AuthPage(QWidget):
                 f"Hệ điều hành {sys_name} chưa được hỗ trợ cấp quyền tự động.\n"
                 "Vui lòng cấu hình thủ công.",
             )
+
+    def _toggle_auto_start(self, is_enabled: bool):
+        """Xử lý Logic tự khởi động cùng OS"""
+        import platform, os
+        sys_name = platform.system()
+        
+        if sys_name == "Darwin":
+            import textwrap
+            from pathlib import Path
+            plist_path = Path(os.path.expanduser("~/Library/LaunchAgents/com.antigravity.omnimind.plist"))
+            
+            if is_enabled:
+                # Tạo LaunchAgent
+                app_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../main.py"))
+                # Note: Nếu pack qua PyInstaller, chỗ này cần trỏ tới file executable
+                plist_content = textwrap.dedent(f"""\
+                    <?xml version="1.0" encoding="UTF-8"?>
+                    <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+                    <plist version="1.0">
+                    <dict>
+                        <key>Label</key>
+                        <string>com.antigravity.omnimind</string>
+                        <key>ProgramArguments</key>
+                        <array>
+                            <string>/usr/bin/env</string>
+                            <string>python3</string>
+                            <string>{app_path}</string>
+                        </array>
+                        <key>RunAtLoad</key>
+                        <true/>
+                        <key>KeepAlive</key>
+                        <false/>
+                    </dict>
+                    </plist>
+                """)
+                try:
+                    plist_path.write_text(plist_content)
+                    import subprocess
+                    subprocess.run(["launchctl", "load", str(plist_path)], capture_output=True)
+                    logger.info("Auto-start enabled for macOS via LaunchAgent.")
+                except Exception as e:
+                    logger.error(f"Failed to enable auto-start on macOS: {e}")
+            else:
+                if plist_path.exists():
+                    try:
+                        import subprocess
+                        subprocess.run(["launchctl", "unload", str(plist_path)], capture_output=True)
+                        plist_path.unlink()
+                        logger.info("Auto-start disabled for macOS.")
+                    except Exception as e:
+                        logger.error(f"Failed to disable auto-start on macOS: {e}")
+                        
+        elif sys_name == "Windows":
+            # Ghi registry để auto start trên Windows
+            import winreg, sys
+            key_path = r"Software\Microsoft\Windows\CurrentVersion\Run"
+            try:
+                key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, key_path, 0, winreg.KEY_SET_VALUE)
+                if is_enabled:
+                    # Truyền sys.argv[0] hoặc file exe nếu đã compiled
+                    winreg.SetValueEx(key, "OmniMind", 0, winreg.REG_SZ, f'"{sys.argv[0]}"')
+                    logger.info("Auto-start enabled for Windows via Registry.")
+                else:
+                    winreg.DeleteValue(key, "OmniMind")
+                    logger.info("Auto-start disabled for Windows.")
+                winreg.CloseKey(key)
+            except Exception as e:
+                logger.error(f"Failed to toggle auto-start on Windows: {e}")
