@@ -17,11 +17,15 @@ class DashboardManager:
 
     def get_license_display_info(self) -> dict:
         """Lấy thông tin bản quyền để hiển thị trên Dashboard."""
+        is_activated = bool(ConfigManager.get("license_key"))
+        status_dot = '<span style="color: #10B981;">●</span>' if is_activated else '<span style="color: #EF4444;">●</span>'
+        status_text = "Đã kích hoạt" if is_activated else "Chưa kích hoạt"
+        
         return {
             "key": ConfigManager.get("license_key", "Chưa kích hoạt"),
             "plan": ConfigManager.get("license_plan", "N/A"),
             "expires_at": ConfigManager.get("license_expires", "N/A"),
-            "status": "✅ Đã kích hoạt" if ConfigManager.get("license_key") else "❌ Chưa kích hoạt"
+            "status": f"{status_dot} {status_text}"
         }
 
     def check_for_updates(self, current_version: str = "1.0.0") -> dict:

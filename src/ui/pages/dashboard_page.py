@@ -83,7 +83,8 @@ class DashboardPage(QWidget):
 
         # Card 2: Bot
         cards_grid.addWidget(self._create_status_card(
-            "Telegram Bot", "Chờ khởi động", "⚪️ Offline",
+            "Telegram Bot", "Chờ khởi động", 
+            '<span style="color: #94A3B8;">●</span> Offline',
             "#3B82F6", "Bot chưa chạy"
         ), 0, 1)
 
@@ -187,6 +188,7 @@ class DashboardPage(QWidget):
         badge_lbl = QLabel(badge)
         badge_lbl.setObjectName("BadgeLbl")
         badge_lbl.setStyleSheet("font-size: 13px; color: #64748B;")
+        badge_lbl.setTextFormat(Qt.RichText)  # Enable HTML for colored dots
         card_layout.addWidget(badge_lbl)
 
         extra_lbl = QLabel(extra)
