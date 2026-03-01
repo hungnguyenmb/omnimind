@@ -1,14 +1,30 @@
 """
 OmniMind - License Gatekeeper Screen
 Hiển thị khi chưa kích hoạt bản quyền. Block toàn bộ tính năng.
+Tích hợp License Manager Engine (HWID + API Verify).
 """
 from PyQt5.QtWidgets import (
-    QDialog, QVBoxLayout, QHBoxLayout, QLabel, 
+    QDialog, QVBoxLayout, QHBoxLayout, QLabel,
     QLineEdit, QPushButton, QFrame, QGraphicsDropShadowEffect
 )
-from PyQt5.QtCore import Qt
+from PyQt5.QtCore import Qt, QThread, pyqtSignal
 from PyQt5.QtGui import QFont, QColor
 from ui.icons import Icons
+
+
+class LicenseVerifyWorker(QThread):
+    """Worker thread để gọi API verify mà không block UI."""
+    finished = pyqtSignal(dict)
+
+    def __init__(self, license_key: str, parent=None):
+        super().__init__(parent)
+        self.license_key = license_key
+
+    def run(self):
+        from engine.license_manager import LicenseManager
+        manager = LicenseManager()
+        result = manager.verify_license(self.license_key)
+        self.finished.emit(result)
 
 
 class LicenseScreen(QDialog):
@@ -18,6 +34,7 @@ class LicenseScreen(QDialog):
         self.setFixedSize(520, 480)
         self.setWindowFlags(Qt.Dialog | Qt.CustomizeWindowHint | Qt.WindowTitleHint)
         self.setObjectName("LicenseDialog")
+        self._worker = None
         self._setup_ui()
 
     def _setup_ui(self):
@@ -96,27 +113,40 @@ class LicenseScreen(QDialog):
         layout.addWidget(form_card)
 
     def _on_activate(self):
-        """Placeholder: Logic xác thực sẽ được triển khai sau khi UI duyệt."""
+        """Gọi License Manager Engine qua Worker Thread (không block UI)."""
         key = self.key_input.text().strip()
         if not key:
             self.status_label.setStyleSheet("color: #EF4444; font-size: 13px;")
             self.status_label.setText("⚠ Vui lòng nhập License Key.")
             return
-        
-        # TODO: Gọi API License Server
-        self.status_label.setStyleSheet("color: #3B82F6; font-size: 13px;")
-        self.status_label.setText("⏳ Đang xác thực với máy chủ...")
-        
-        # Giả lập: Cho phép vào App (sẽ thay bằng API call)
-        from PyQt5.QtCore import QTimer
-        QTimer.singleShot(1500, self._simulate_success)
 
-    def _simulate_success(self):
-        """Giả lập kích hoạt thành công (sẽ thay bằng API thật)."""
-        self.status_label.setStyleSheet("color: #10B981; font-size: 13px;")
-        self.status_label.setText("✅ Kích hoạt thành công!")
-        from PyQt5.QtCore import QTimer
-        QTimer.singleShot(800, self.accept)
+        # Vô hiệu hoá nút để tránh spam
+        self.activate_btn.setEnabled(False)
+        self.activate_btn.setText("  Đang xác thực...")
+        self.status_label.setStyleSheet("color: #3B82F6; font-size: 13px;")
+        self.status_label.setText("⏳ Đang kết nối tới máy chủ xác thực...")
+
+        # Chạy verify trên thread riêng
+        self._worker = LicenseVerifyWorker(key)
+        self._worker.finished.connect(self._on_verify_result)
+        self._worker.start()
+
+    def _on_verify_result(self, result: dict):
+        """Callback từ Worker Thread sau khi có kết quả từ Server."""
+        self.activate_btn.setEnabled(True)
+        self.activate_btn.setText("  Kích Hoạt Bản Quyền")
+
+        if result.get("success"):
+            plan = result.get("plan", "Standard")
+            self.status_label.setStyleSheet("color: #10B981; font-size: 13px;")
+            self.status_label.setText(f"✅ Kích hoạt thành công! Gói: {plan}")
+            # Đợi 1 giây rồi đóng dialog (accept = cho phép vào App)
+            from PyQt5.QtCore import QTimer
+            QTimer.singleShot(1000, self.accept)
+        else:
+            message = result.get("message", "Lỗi không xác định.")
+            self.status_label.setStyleSheet("color: #EF4444; font-size: 13px;")
+            self.status_label.setText(f"❌ {message}")
 
     def get_license_key(self):
         return self.key_input.text().strip()
