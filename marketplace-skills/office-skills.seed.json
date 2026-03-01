@@ -1,0 +1,112 @@
+[
+  {
+    "id": "office-meeting-notes",
+    "name": "Office Meeting Notes",
+    "description": "Tóm tắt họp, quyết định và action item có owner/deadline.",
+    "skill_type": "PRODUCTIVITY",
+    "price": 0,
+    "author": "OmniMind Team",
+    "version": "1.0.0",
+    "is_vip": false,
+    "manifest_json": {
+      "icon": "📝",
+      "badge": "FREE",
+      "color": "#0EA5E9",
+      "short_description": "Biến ghi chú họp thành tóm tắt, quyết định và danh sách việc cần làm.",
+      "detail_description": "Hỗ trợ chuẩn hóa biên bản họp theo format quản trị: summary, decisions, risks, action items và email follow-up.",
+      "downloads": {
+        "darwin": { "url": "https://license.vinhyenit.com/skills/office_meeting_notes.zip" },
+        "win32": { "url": "https://license.vinhyenit.com/skills/office_meeting_notes.zip" },
+        "linux": { "url": "https://license.vinhyenit.com/skills/office_meeting_notes.zip" }
+      }
+    }
+  },
+  {
+    "id": "office-email-assistant",
+    "name": "Office Email Assistant",
+    "description": "Soạn email công việc chuyên nghiệp theo nhiều ngữ điệu.",
+    "skill_type": "COMMUNICATION",
+    "price": 0,
+    "author": "OmniMind Team",
+    "version": "1.0.0",
+    "is_vip": false,
+    "manifest_json": {
+      "icon": "✉️",
+      "badge": "FREE",
+      "color": "#14B8A6",
+      "short_description": "Soạn mới, rewrite và tối ưu email công việc rõ ràng.",
+      "detail_description": "Tạo subject và body theo mục tiêu: request, follow-up, update, reminder, escalation với CTA rõ ràng.",
+      "downloads": {
+        "darwin": { "url": "https://license.vinhyenit.com/skills/office_email_assistant.zip" },
+        "win32": { "url": "https://license.vinhyenit.com/skills/office_email_assistant.zip" },
+        "linux": { "url": "https://license.vinhyenit.com/skills/office_email_assistant.zip" }
+      }
+    }
+  },
+  {
+    "id": "office-excel-report",
+    "name": "Office Excel Report",
+    "description": "Phân tích bảng dữ liệu và tạo insight cho quản lý.",
+    "skill_type": "ANALYTICS",
+    "price": 0,
+    "author": "OmniMind Team",
+    "version": "1.0.0",
+    "is_vip": false,
+    "manifest_json": {
+      "icon": "📊",
+      "badge": "FREE",
+      "color": "#3B82F6",
+      "short_description": "Tóm tắt KPI, biến động và điểm bất thường từ dữ liệu bảng.",
+      "detail_description": "Phù hợp báo cáo tuần/tháng: trend, variance, top contributor, risk và đề xuất hành động.",
+      "downloads": {
+        "darwin": { "url": "https://license.vinhyenit.com/skills/office_excel_report.zip" },
+        "win32": { "url": "https://license.vinhyenit.com/skills/office_excel_report.zip" },
+        "linux": { "url": "https://license.vinhyenit.com/skills/office_excel_report.zip" }
+      }
+    }
+  },
+  {
+    "id": "office-document-qa",
+    "name": "Office Document QA",
+    "description": "Kiểm lỗi logic, độ rõ ràng và nhất quán tài liệu nội bộ.",
+    "skill_type": "QUALITY",
+    "price": 0,
+    "author": "OmniMind Team",
+    "version": "1.0.0",
+    "is_vip": false,
+    "manifest_json": {
+      "icon": "✅",
+      "badge": "FREE",
+      "color": "#22C55E",
+      "short_description": "Rà soát tài liệu trước khi gửi: cấu trúc, thuật ngữ, chỗ mơ hồ.",
+      "detail_description": "Đánh dấu issue theo mức độ critical/important/nice-to-have và đề xuất câu viết lại cụ thể.",
+      "downloads": {
+        "darwin": { "url": "https://license.vinhyenit.com/skills/office_document_qa.zip" },
+        "win32": { "url": "https://license.vinhyenit.com/skills/office_document_qa.zip" },
+        "linux": { "url": "https://license.vinhyenit.com/skills/office_document_qa.zip" }
+      }
+    }
+  },
+  {
+    "id": "office-task-planner",
+    "name": "Office Task Planner",
+    "description": "Chuyển mục tiêu thành kế hoạch tuần có ưu tiên và deadline.",
+    "skill_type": "PRODUCTIVITY",
+    "price": 0,
+    "author": "OmniMind Team",
+    "version": "1.0.0",
+    "is_vip": false,
+    "manifest_json": {
+      "icon": "📅",
+      "badge": "FREE",
+      "color": "#F59E0B",
+      "short_description": "Lập kế hoạch công việc tuần theo mức ưu tiên và công suất.",
+      "detail_description": "Tách goal thành milestone/task, phân bổ theo ngày và xuất format standup hằng ngày.",
+      "downloads": {
+        "darwin": { "url": "https://license.vinhyenit.com/skills/office_task_planner.zip" },
+        "win32": { "url": "https://license.vinhyenit.com/skills/office_task_planner.zip" },
+        "linux": { "url": "https://license.vinhyenit.com/skills/office_task_planner.zip" }
+      }
+    }
+  }
+]

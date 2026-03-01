@@ -1,0 +1,63 @@
+# Quản Lý Tiến Độ (OmniMind - Pro AI Assistant)
+
+- [x] Khởi tạo Dự Án & Kế Hoạch
+  - [x] Lên kế hoạch chi tiết bằng tiếng Việt
+  - [x] Phân tích & Bổ sung tính năng nâng cao (System Tray, Dashboard Changelog)
+  - [x] Bổ sung logic AI Thought Streaming lên Telegram
+- [x] Xây dựng UI/UX (Code Giao Diện Đầu Tiên)
+  - [x] Hệ thống Icon SVG (17 icon Feather-style, đổi màu linh hoạt) — `icons.py`
+  - [x] Màn hình License Gatekeeper (Popup gradient, chặn toàn bộ) — `license_screen.py`
+  - [x] Layout Main: Sidebar + Routing + System Tray — `main_window.py`
+  - [x] Tab Dashboard (3 Status Cards, OS Info, Bot Toggle, Changelog) — `dashboard_page.py`
+  - [x] Tab Auth & Core (Codex CLI, Telegram, Workspace, Sandbox, Permissions) — `auth_page.py`
+  - [x] Tab Memory & Rules (CRUD Table + Popup thêm mới) — `memory_page.py`
+  - [x] Tab Vault (Dynamic Form, Desktop Account, Toggle Eye) — `vault_page.py`
+  - [x] Tab Skill Marketplace (Equal Cards, Detail Popup, Sub-tabs) — `skill_store_page.py`
+  - [x] QSS Stylesheet chuyên nghiệp (toàn bộ component) — `styles.qss`
+  - [x] ✅ ALL UI TESTS PASSED
+  - [x] Tách Repository thành các dự án riêng biệt (github-manager rule)
+  - [x] Push lên GitHub: [license-server](https://github.com/hungnguyenmb/license-server), [license-dashboard](https://github.com/hungnguyenmb/license-dashboard), [omnimind](https://github.com/hungnguyenmb/omnimind)
+  - [x] Cập nhật Walkthrough tổng kết Stage 1 & 2
+- [/] Giai đoạn 2: Backend & Logic (ĐANG LẬP KẾ HOẠCH)
+  - [x] Phân tích Payment Types (Skill vs License) & Auto-issuance logic
+  - [x] Tạo tài liệu đặc tả Tính năng & API (api_and_features_spec.md)
+  - [x] Thiết lập Cơ sở dữ liệu SQLite & DB Manager
+  - [x] Module 1: Logic License Gatekeeper (HWID + API Verify + QThread)
+  - [x] Tạo tài liệu API Documentation (api_documentation.md)
+  - [x] Tích hợp API OmniMind vào License Server Backend
+    - [x] Tạo SQL Migration (Bảng mới cho OmniMind)
+    - [x] Thêm API Routes vào `license-server/src/omnimind_routes.js`
+    - [x] Cập nhật Client config (ENV base URL)
+    - [x] Ghi chú Project Map vào tài liệu
+    - [x] Test localhost — 4/4 PASS ✅
+  - [x] Module 2: Cấu hình & Môi trường AI (Authentication & Environment)
+    - [x] **Settings Page Logic**: Lưu/Load Telegram Token, Chat ID, Workspace Path
+    - [x] **Environment Setup**: Logic kiểm tra và cài đặt tự động `python3`, `node`, `npm` (Cross-platform)
+    - [x] **Admin/Sudo Logic**: UI yêu cầu quyền quản trị để cài đặt môi trường
+    - [x] **Codex CLI**: Tải binary từ CMS, giải nén và cấu hình PATH (Mac/Win)
+    - [x] **Codex Auth**: Logic xác thực tài khoản qua CLI (`login status`)
+    - [x] **Codex Logout**: Logic đăng xuất tài khoản qua CLI (`logout`)
+    - [ ] **Sync Logic**: Logic CRUD đồng bộ Memory Rules và Vault Resources với SQLite
+  - [/] Module 3: Logic CRUD (Đồng bộ Memory Rules & Vault Resources với DB)
+    - [x] **Memory Rules**: CRUD lưu vào SQLite
+      - [x] Tạo `MemoryManager` trong `engine/`
+      - [x] Chỉnh sửa `MemoryPage` để sử dụng `MemoryManager`
+      - [x] Tích hợp logic Thêm, Sửa, Xoá và thay đổi trạng thái
+    - [x] **Vault Resources**: CRUD tích hợp mã hoá dữ liệu lưu DB
+      - [x] Nghiên cứu giao diện `VaultPage` hiện tại
+      - [x] Lập kế hoạch triển khai (bao gồm logic mã hoá)
+      - [x] Tạo `VaultManager` trong `engine/` hỗ trợ mã hoá/giải mã
+      - [x] Chỉnh sửa `VaultPage` để sử dụng `VaultManager`
+      - [x] Tích hợp logic Thêm, Sửa, Xoá và hiển thị dữ liệu
+    - [x] **Data Encryption**: Logic mã hoá thông tin nhạy cảm (tài khoản/pass) trong Vault
+  - [/] Module 4: Dashboard & Skill Marketplace (API Integration)
+    - [x] **Dashboard API**: Trạng thái bản quyền & Cập nhật phiên bản
+      - [x] Nghiên cứu giao diện `DashboardPage`
+      - [x] Nghiên cứu các API liên quan trong `license-server`
+      - [x] Tạo `DashboardManager` xử lý gọi API & nạp config
+      - [x] Chỉnh sửa `DashboardPage` hiển thị dữ liệu thực tế
+    - [ ] **Skill Marketplace API**: Danh mục & Manifest Skills
+      - [ ] Tạo `SkillStoreManager` gọi API `/api/v1/omnimind/skills`
+      - [ ] Chỉnh sửa `SkillStorePage` nạp dữ liệu động từ Server
+  - [ ] Module 5: Động cơ AI & Telegram Bot (Context Engine, Subprocess, Status)
+- [ ] Bảo mật & Gói Cài Đặt (Stage 3)
