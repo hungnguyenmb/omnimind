@@ -158,21 +158,80 @@ class EnvironmentManager:
 
     def verify_codex_auth(self) -> dict:
         """
-        Chạy thử `codex --version` để check đã nhận lệnh chưa.
-        Giả lập việc kiểm tra account nếu sau này Codex CLI hỗ trợ lệnh `codex status`.
+        Kiểm tra trạng thái đăng nhập thực tế của Codex.
+        Ưu tiên đọc file config `~/.codex/auth.json` để tránh bị treo CLI.
         """
+        import json
+        
         try:
-            # Ưu tiên lấy từ thư mục bin cục bộ
-            codex_cmd = shutil.which("codex", path=str(self.codex_bin_dir)) or "codex"
+            # 1. Kiểm tra file config trước (cách tốt nhất để tránh hang)
+            codex_dir = Path.home() / ".codex"
+            auth_file = codex_dir / "auth.json"
             
-            result = subprocess.run([codex_cmd, "--version"], capture_output=True, text=True, timeout=10)
-            if result.returncode == 0:
-                return {"success": True, "version": result.stdout.strip(), "message": "Xác thực thành công."}
+            if auth_file.exists():
+                logger.info(f"codex auth_file found at {auth_file}")
+                with open(auth_file, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    
+                auth_mode = data.get("auth_mode", "unknown")
+                tokens = data.get("tokens", {})
+                api_key = data.get("OPENAI_API_KEY")
+                has_tokens = isinstance(tokens, dict) and any(bool(v) for v in tokens.values())
+                has_api_key = bool(api_key)
+                
+                # Nếu có token hoặc có API Key -> Đã đăng nhập
+                if has_tokens or has_api_key:
+                    logger.info("Codex auth verified via auth.json")
+                    return {"success": True, "version": f"Logged in ({auth_mode})", "message": "Xác thực thành công qua config."}
             else:
-                return {"success": False, "message": f"Lỗi CLI: {result.stderr.strip()}"}
+                logger.debug(f"codex auth_file not found at {auth_file}")
+            
+            # 2. Xử lý xóa log cũ nếu cần fallback
+            codex_cmd = shutil.which("codex", path=str(self.codex_bin_dir)) or "codex"
+            logger.info(f"Fallback: Checking Codex auth status using: {codex_cmd}")
+            
+            subprocess.run([codex_cmd, "--version"], capture_output=True, text=True, timeout=3, stdin=subprocess.DEVNULL)
+            
+            # Sử dụng timeout ngắn để tránh treo hoàn toàn
+            result = subprocess.run(
+                [codex_cmd, "login", "status"], 
+                capture_output=True, 
+                text=True, 
+                timeout=5, 
+                stdin=subprocess.DEVNULL
+            )
+            
+            output = result.stdout.strip()
+            output_lower = output.lower()
+            if result.returncode == 0 and ("logged in" in output_lower or "authenticated" in output_lower):
+                return {"success": True, "version": output, "message": "Xác thực thành công."}
+            else:
+                return {"success": False, "message": "Chưa đăng nhập tài khoản Codex."}
+                
+        except json.JSONDecodeError:
+            logger.error("Failed to parse auth.json")
+            return {"success": False, "message": "Lỗi file cấu hình Codex."}
         except FileNotFoundError:
+            logger.error("Codex CLI not found.")
             return {"success": False, "message": "Không tìm thấy Codex CLI."}
         except subprocess.TimeoutExpired:
-            return {"success": False, "message": "Hết thời gian chờ (Timeout)."}
+            logger.error("Codex CLI status check timed out.")
+            return {"success": False, "message": "Hết thời gian chờ kết nối CLI."}
         except Exception as e:
-            return {"success": False, "message": f"Lỗi không xác định: {str(e)[:50]}"}
+            logger.exception("Unexpected error during Codex auth verification")
+            return {"success": False, "message": f"Lỗi xác thực: {str(e)[:50]}"}
+
+    def logout_codex(self) -> dict:
+        """
+        Thực hiện đăng xuất tài khoản trong CLI.
+        """
+        try:
+            codex_cmd = shutil.which("codex", path=str(self.codex_bin_dir)) or "codex"
+            result = subprocess.run([codex_cmd, "logout"], capture_output=True, text=True, timeout=10)
+            
+            if result.returncode == 0:
+                return {"success": True, "message": "Đã đăng xuất thành công."}
+            else:
+                return {"success": False, "message": f"Lỗi khi đăng xuất: {result.stderr.strip()}"}
+        except Exception as e:
+            return {"success": False, "message": f"Lỗi hệ thống: {str(e)[:50]}"}

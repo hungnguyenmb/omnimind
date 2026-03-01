@@ -7,7 +7,7 @@ from PyQt5.QtWidgets import (
     QLineEdit, QComboBox, QFrame, QGraphicsDropShadowEffect,
     QCheckBox, QFileDialog, QScrollArea
 )
-from PyQt5.QtCore import Qt
+from PyQt5.QtCore import Qt, QThread, pyqtSignal
 from PyQt5.QtGui import QColor
 from ui.icons import Icons
 from engine.config_manager import ConfigManager
@@ -17,9 +17,27 @@ import logging
 logger = logging.getLogger(__name__)
 
 
+class CodexVerifyWorker(QThread):
+    """Chạy verify Codex trên thread riêng để không block UI."""
+    finished = pyqtSignal(dict)
+
+    def __init__(self, env_manager, parent=None):
+        super().__init__(parent)
+        self.env_manager = env_manager
+
+    def run(self):
+        try:
+            result = self.env_manager.verify_codex_auth()
+        except Exception as e:
+            logger.exception("Codex verify worker failed")
+            result = {"success": False, "message": f"Lỗi: {str(e)[:40]}"}
+        self.finished.emit(result)
+
+
 class AuthPage(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
+        self._verify_worker = None
         try:
             self.env_manager = EnvironmentManager()
         except Exception as e:
@@ -369,13 +387,29 @@ class AuthPage(QWidget):
             return
         
         if env_status["is_ready"]:
-            # Đã cài đủ đồ chơi → hiện nút Xác thực
-            self.codex_status_icon.setText("🟡")
-            self.codex_status_label.setText("Đã cài đặt · Chưa xác thực")
-            self.codex_status_label.setStyleSheet("font-size: 14px; font-weight: 600; color: #F59E0B;")
-            self.codex_verify_btn.setVisible(True)
-            self.codex_download_btn.setVisible(False)
-            self.codex_hint.setText("Môi trường Python, Node, và Codex CLI đã sẵn sàng. Nhấn xác thực để kiểm tra tài khoản.")
+            # Kiểm tra xem trước đó đã xác thực chưa
+            auth_status = ConfigManager.get("codex_auth_status", "unverified")
+            
+            if auth_status == "verified":
+                self.codex_status_icon.setText("🟢")
+                self.codex_status_label.setText("Đã kết nối") # Sẽ cập nhật version khi live check hoàn tất
+                self.codex_status_label.setStyleSheet("font-size: 14px; font-weight: 600; color: #10B981;")
+                self.codex_verify_btn.setText("  Đã xác thực")
+                self.codex_verify_btn.setObjectName("InstalledBtn")
+                self.codex_verify_btn.setIcon(Icons.check_circle("#10B981", 16))
+                self.codex_verify_btn.setVisible(True)
+                self.codex_logout_btn.setVisible(True)
+                self.codex_download_btn.setVisible(False)
+                self.codex_hint.setText("Hệ thống đã sẵn sàng sử dụng.")
+                # Chạy Live Check ngầm để lấy version thực tế
+                self._verify_codex()
+            else:
+                self.codex_status_icon.setText("🟡")
+                self.codex_status_label.setText("Đã cài đặt · Chưa xác thực")
+                self.codex_status_label.setStyleSheet("font-size: 14px; font-weight: 600; color: #F59E0B;")
+                self.codex_verify_btn.setVisible(True)
+                self.codex_download_btn.setVisible(False)
+                self.codex_hint.setText("Môi trường Python, Node, và Codex CLI đã sẵn sàng. Nhấn xác thực để kiểm tra tài khoản.")
         else:
             # Thiếu → hiện nút Tải
             self.codex_status_icon.setText("🔴")
@@ -453,52 +487,88 @@ class AuthPage(QWidget):
         self.codex_hint.setText("Cài đặt thành công! Nhấn xác thực để đăng nhập tài khoản Codex.")
 
     def _verify_codex(self):
-        """Kiểm tra xác thực Codex CLI."""
-        import subprocess
-        try:
-            result = subprocess.run(
-                ["codex", "--version"],
-                capture_output=True, text=True, timeout=5
-            )
-            if result.returncode == 0:
-                version = result.stdout.strip()
-                self.codex_status_icon.setText("🟢")
-                self.codex_status_label.setText(f"Đã kết nối · {version}")
-                self.codex_status_label.setStyleSheet("font-size: 14px; font-weight: 600; color: #10B981;")
-                self.codex_verify_btn.setText("  Đã xác thực")
-                self.codex_verify_btn.setObjectName("InstalledBtn")
-                self.codex_verify_btn.setIcon(Icons.check_circle("#10B981", 16))
-                self.codex_verify_btn.style().unpolish(self.codex_verify_btn)
-                self.codex_verify_btn.style().polish(self.codex_verify_btn)
-                self.codex_logout_btn.setVisible(True)
-                self.codex_hint.setText("Codex CLI đã xác thực thành công. Sẵn sàng sử dụng.")
-            else:
-                self._set_codex_error("Codex chưa đăng nhập")
-        except FileNotFoundError:
-            self._set_codex_error("Codex CLI chưa được cài đặt")
-        except subprocess.TimeoutExpired:
-            self._set_codex_error("Timeout khi kết nối")
-        except Exception as e:
-            self._set_codex_error(f"Lỗi: {str(e)[:40]}")
+        """Kiểm tra xác thực Codex CLI sử dụng EnvironmentManager."""
+        if self.env_manager is None:
+            logger.error("AuthPage: env_manager is None during _verify_codex")
+            self._set_codex_error("Cấu trúc môi trường lỗi")
+            return
+        if self._verify_worker and self._verify_worker.isRunning():
+            return
+
+        logger.info("Starting Codex verification...")
+        self.codex_verify_btn.setEnabled(False)
+        self.codex_status_icon.setText("🟡")
+        self.codex_status_label.setText("Đang xác thực tài khoản Codex...")
+        self.codex_status_label.setStyleSheet("font-size: 14px; font-weight: 600; color: #3B82F6;")
+        self.codex_hint.setText("Đang kiểm tra trạng thái đăng nhập, vui lòng chờ.")
+
+        self._verify_worker = CodexVerifyWorker(self.env_manager, self)
+        self._verify_worker.finished.connect(self._on_verify_finished)
+        self._verify_worker.start()
+
+    def _on_verify_finished(self, result: dict):
+        logger.info(f"Codex verify result: {result}")
+        self.codex_verify_btn.setEnabled(True)
+        self._verify_worker = None
+
+        if result.get("success"):
+            self._on_verify_success(result.get("version", "v1.0.0"))
+        else:
+            self._set_codex_error(result.get("message", "Xác thực thất bại"))
+
+    def _on_verify_success(self, version):
+        """Callback khi xác thực thành công."""
+        self.codex_status_icon.setText("🟢")
+        self.codex_status_label.setText(f"Đã kết nối · {version}")
+        self.codex_status_label.setStyleSheet("font-size: 14px; font-weight: 600; color: #10B981;")
+        
+        self.codex_verify_btn.setText("  Đã xác thực")
+        self.codex_verify_btn.setObjectName("InstalledBtn")
+        self.codex_verify_btn.setIcon(Icons.check_circle("#10B981", 16))
+        self.codex_verify_btn.style().unpolish(self.codex_verify_btn)
+        self.codex_verify_btn.style().polish(self.codex_verify_btn)
+        
+        self.codex_verify_btn.setVisible(True)
+        self.codex_logout_btn.setVisible(True)
+        self.codex_hint.setText("Codex CLI đã xác thực thành công. Sẵn sàng sử dụng.")
+        
+        # Lưu trạng thái vào Database
+        ConfigManager.set("codex_auth_status", "verified")
 
     def _set_codex_error(self, msg):
         self.codex_status_icon.setText("🔴")
         self.codex_status_label.setText(msg)
         self.codex_status_label.setStyleSheet("font-size: 14px; font-weight: 600; color: #EF4444;")
-        self.codex_logout_btn.setVisible(False)
-
-    def _logout_codex(self):
-        """Reset trạng thái về đã cài nhưng chưa xác thực."""
-        self.codex_status_icon.setText("🟡")
-        self.codex_status_label.setText("Đã cài đặt · Chưa xác thực")
-        self.codex_status_label.setStyleSheet("font-size: 14px; font-weight: 600; color: #F59E0B;")
         self.codex_verify_btn.setText("  Xác thực tài khoản")
         self.codex_verify_btn.setObjectName("PrimaryBtn")
         self.codex_verify_btn.setIcon(Icons.check_circle("#FFFFFF", 16))
         self.codex_verify_btn.style().unpolish(self.codex_verify_btn)
         self.codex_verify_btn.style().polish(self.codex_verify_btn)
+        self.codex_verify_btn.setVisible(True)
+        self.codex_logout_btn.setVisible(False)
+        self.codex_hint.setText("Chưa đăng nhập hoặc phiên đăng nhập đã hết hạn. Vui lòng xác thực lại.")
+        ConfigManager.set("codex_auth_status", "unverified")
+
+    def _logout_codex(self):
+        """Xóa trạng thái xác thực trong CLI và Database."""
+        if self.env_manager:
+            self.env_manager.logout_codex()
+            
+        self.codex_status_icon.setText("🟡")
+        self.codex_status_label.setText("Đã cài đặt · Chưa xác thực")
+        self.codex_status_label.setStyleSheet("font-size: 14px; font-weight: 600; color: #F59E0B;")
+        
+        self.codex_verify_btn.setText("  Xác thực tài khoản")
+        self.codex_verify_btn.setObjectName("PrimaryBtn")
+        self.codex_verify_btn.setIcon(Icons.check_circle("#FFFFFF", 16))
+        self.codex_verify_btn.style().unpolish(self.codex_verify_btn)
+        self.codex_verify_btn.style().polish(self.codex_verify_btn)
+        
         self.codex_logout_btn.setVisible(False)
         self.codex_hint.setText("Đã đăng xuất. Nhấn xác thực để đăng nhập lại bằng tài khoản khác.")
+        
+        # Xóa trạng thái trong Database
+        ConfigManager.set("codex_auth_status", "unverified")
 
     def _request_permission(self, perm_type, checked):
         """Yêu cầu quyền hệ thống tuỳ theo OS (macOS / Windows)."""
