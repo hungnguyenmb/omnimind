@@ -12,6 +12,7 @@ from PyQt5.QtWidgets import (
 from PyQt5.QtCore import Qt
 from PyQt5.QtGui import QColor
 from ui.icons import Icons
+from engine.vault_manager import VaultManager
 
 
 # ─────────────────────────────────────────────
@@ -55,8 +56,9 @@ RESOURCE_FIELDS = {
 class ResourceDialog(QDialog):
     """Popup Thêm / Sửa Resource. Form thay đổi động theo loại Resource."""
 
-    def __init__(self, parent=None, mode="add", resource_type="SSH", data=None):
+    def __init__(self, parent=None, mode="add", resource_type="SSH", res_id=None, data=None):
         super().__init__(parent)
+        self.res_id = res_id
         self.setWindowTitle("Thêm Resource Mới" if mode == "add" else "Sửa Resource")
         self.setMinimumSize(580, 520)
         self.resize(620, 580)
@@ -203,7 +205,7 @@ class ResourceDialog(QDialog):
 
     def get_data(self):
         res_type = self.type_combo.currentText()
-        data = {"type": res_type}
+        data = {"type": res_type, "id": self.res_id}
         for key, widget in self.field_widgets.items():
             if isinstance(widget, QComboBox):
                 data[key] = widget.currentText()
@@ -218,12 +220,10 @@ class ResourceDialog(QDialog):
 class VaultPage(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
-        self._sample_data = [
-            {"type": "SSH", "host": "192.168.1.100", "port": "22", "username": "root", "password": "my_pass_123", "description": "VPS Production"},
-            {"type": "Email", "provider": "Gmail", "username": "admin@gmail.com", "password": "app_pass_abc", "description": "Gmail gửi báo cáo"},
-            {"type": "API_KEY", "provider": "ChatGPT / OpenAI", "api_key": "sk-proj-abc123xyz", "description": "OpenAI API Key"},
-        ]
+        self.vault_mgr = VaultManager()
+        self._resources_data = []
         self._setup_ui()
+        self._load_resources()
 
     def _setup_ui(self):
         layout = QVBoxLayout(self)
@@ -287,31 +287,35 @@ class VaultPage(QWidget):
         self.table.setMinimumHeight(280)
         self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
 
+    def _load_resources(self):
+        """Tải dữ liệu từ DB."""
+        self._resources_data = self.vault_mgr.get_all_resources()
         self._populate_table()
-
-        card_layout.addWidget(self.table)
-        layout.addWidget(table_card)
-        layout.addStretch()
 
     def _get_display_fields(self, data):
         res_type = data.get("type", "")
+        # Nếu là dữ liệu từ DB, dữ liệu fields nằm trong credentials_data
+        fields = data.get("credentials_data", data)
+        
         if res_type == "SSH":
-            return data.get("host", ""), data.get("username", ""), data.get("password", "")
+            return fields.get("host", ""), fields.get("username", ""), fields.get("password", "")
         elif res_type == "Email":
-            return data.get("provider", ""), data.get("username", ""), data.get("password", "")
+            return fields.get("provider", ""), fields.get("username", ""), fields.get("password", "")
         elif res_type == "API_KEY":
-            return data.get("provider", ""), data.get("api_key", "")[:12] + "...", data.get("api_key", "")
+            key = fields.get("api_key", "")
+            display_key = key[:12] + "..." if len(key) > 12 else key
+            return fields.get("provider", ""), display_key, key
         elif res_type == "Database":
-            return data.get("host", ""), data.get("username", ""), data.get("password", "")
+            return fields.get("host", ""), fields.get("username", ""), fields.get("password", "")
         elif res_type == "Hệ điều hành":
-            return "OS Login", data.get("username", ""), data.get("password", "")
+            return "OS Login", fields.get("username", ""), fields.get("password", "")
         return "", "", ""
 
     def _populate_table(self):
-        self.table.setRowCount(len(self._sample_data))
-        for i, data in enumerate(self._sample_data):
+        self.table.setRowCount(len(self._resources_data))
+        for i, data in enumerate(self._resources_data):
             res_type = data.get("type", "")
-            host_or_provider, user_or_key, cred = self._get_display_fields(data)
+            host_or_provider, user_or_key, _ = self._get_display_fields(data)
 
             type_item = QTableWidgetItem(res_type)
             type_colors = {"SSH": "#10B981", "Email": "#3B82F6", "API_KEY": "#8B5CF6", "Database": "#F59E0B"}
@@ -352,29 +356,54 @@ class VaultPage(QWidget):
         dialog = ResourceDialog(self, mode="add")
         if dialog.exec_() == QDialog.Accepted:
             data = dialog.get_data()
-            if any(v for k, v in data.items() if k != "type"):
-                self._sample_data.append(data)
-                self._populate_table()
+            if any(v for k, v in data.items() if k not in ["type", "id"]):
+                res_type = data.pop("type")
+                res_id = data.pop("id") # Not used in add
+                username = data.get("username", data.get("provider", "admin"))
+                identifier = data.get("host", data.get("provider", "any"))
+                desc = data.pop("description", "")
+                
+                if self.vault_mgr.add_resource(res_type, identifier, username, data, desc):
+                    self._load_resources()
+                else:
+                    QMessageBox.warning(self, "Lỗi", "Không thể lưu resource.")
 
     def _show_edit_dialog(self, row):
-        if row >= len(self._sample_data):
+        if row >= len(self._resources_data):
             return
-        data = self._sample_data[row]
-        dialog = ResourceDialog(self, mode="edit", resource_type=data.get("type", "SSH"), data=data)
+        data = self._resources_data[row]
+        # data contains id, type, identifier, username, credentials, description, credentials_data
+        full_data = data.get("credentials_data", {}).copy()
+        full_data["description"] = data.get("description", "")
+        full_data["type"] = data.get("type", "")
+        full_data["id"] = data.get("id")
+        
+        dialog = ResourceDialog(self, mode="edit", resource_type=data.get("type", "SSH"), res_id=data.get("id"), data=full_data)
         if dialog.exec_() == QDialog.Accepted:
-            new_data = dialog.get_data()
-            self._sample_data[row] = new_data
-            self._populate_table()
+            new_payload = dialog.get_data()
+            res_type = new_payload.pop("type")
+            res_id = new_payload.pop("id")
+            username = new_payload.get("username", new_payload.get("provider", "admin"))
+            identifier = new_payload.get("host", new_payload.get("provider", "any"))
+            desc = new_payload.pop("description", "")
+            
+            if self.vault_mgr.update_resource(res_id, res_type, identifier, username, new_payload, desc):
+                self._load_resources()
+            else:
+                QMessageBox.warning(self, "Lỗi", "Không thể cập nhật resource.")
 
     def _confirm_delete(self, row):
-        if row >= len(self._sample_data):
+        if row >= len(self._resources_data):
             return
-        desc = self._sample_data[row].get("description", self._sample_data[row].get("type", ""))
+        res = self._resources_data[row]
+        desc = res.get("description", res.get("type", ""))
         reply = QMessageBox.question(
             self, "Xác nhận Xoá",
             f"Bạn có chắc chắn muốn xoá resource \"{desc}\" không?\n\nHành động này không thể hoàn tác.",
             QMessageBox.Yes | QMessageBox.No, QMessageBox.No
         )
         if reply == QMessageBox.Yes:
-            del self._sample_data[row]
-            self._populate_table()
+            if self.vault_mgr.delete_resource(res["id"]):
+                self._load_resources()
+            else:
+                QMessageBox.warning(self, "Lỗi", "Không thể xoá resource.")

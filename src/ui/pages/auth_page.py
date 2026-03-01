@@ -393,10 +393,19 @@ class AuthPage(QWidget):
             self.codex_status_label.setStyleSheet("font-size: 14px; font-weight: 600; color: #EF4444;")
             self.codex_hint.setText(f"Chi tiết lỗi: {str(e)[:60]}")
             return
-        
-        if env_status["is_ready"]:
+
+        codex_ready = env_status.get("codex_ready", env_status.get("codex") == "OK")
+        runtime_missing = [k for k in ("python", "node", "npm") if env_status.get(k) == "MISSING"]
+
+        if codex_ready:
             # Kiểm tra xem trước đó đã xác thực chưa
             auth_status = ConfigManager.get("codex_auth_status", "unverified")
+            runtime_warn = ""
+            if runtime_missing:
+                runtime_warn = (
+                    f" Thiếu runtime: {', '.join(runtime_missing)}."
+                    " Một số tính năng Bot có thể không hoạt động cho tới khi cài bổ sung."
+                )
             
             if auth_status == "verified":
                 self.codex_status_icon.setText("🟢")
@@ -408,7 +417,7 @@ class AuthPage(QWidget):
                 self.codex_verify_btn.setVisible(True)
                 self.codex_logout_btn.setVisible(True)
                 self.codex_download_btn.setVisible(False)
-                self.codex_hint.setText("Hệ thống đã sẵn sàng sử dụng.")
+                self.codex_hint.setText(f"Hệ thống đã sẵn sàng sử dụng.{runtime_warn}")
                 # Chạy Live Check ngầm để lấy version thực tế
                 self._verify_codex()
             else:
@@ -417,12 +426,14 @@ class AuthPage(QWidget):
                 self.codex_status_label.setStyleSheet("font-size: 14px; font-weight: 600; color: #F59E0B;")
                 self.codex_verify_btn.setVisible(True)
                 self.codex_download_btn.setVisible(False)
-                self.codex_hint.setText("Môi trường Python, Node, và Codex CLI đã sẵn sàng. Nhấn xác thực để kiểm tra tài khoản.")
+                self.codex_hint.setText(
+                    "Codex CLI đã sẵn sàng. Nhấn xác thực để kiểm tra tài khoản."
+                    f"{runtime_warn}"
+                )
         else:
             # Thiếu → hiện nút Tải
             self.codex_status_icon.setText("🔴")
-            
-            missing = [k for k, v in env_status.items() if v == "MISSING" and k != "is_ready"]
+            missing = [k for k in ("python", "node", "npm", "codex") if env_status.get(k) == "MISSING"]
             if missing:
                 self.codex_status_label.setText(f"Thiếu môi trường: {', '.join(missing)}")
             else:
@@ -437,8 +448,6 @@ class AuthPage(QWidget):
 
     def _download_codex(self):
         """Tải và cài đặt Môi trường (nếu thiếu) sau đó tải Codex CLI."""
-        from PyQt5.QtWidgets import QMessageBox
-        
         self.codex_download_btn.setEnabled(False)
         self.codex_download_btn.setText("  Đang cài đặt...")
         self.codex_status_label.setText("Đang cài đặt môi trường và Codex...")
@@ -449,37 +458,48 @@ class AuthPage(QWidget):
         import threading
         def install_worker():
             try:
+                release_manifest = self.env_manager.fetch_codex_release_manifest()
+                install_policy = release_manifest.get("install_policy", {})
+                auto_install_runtime = bool(install_policy.get("auto_install_runtime", True))
+
                 env_status = self.env_manager.check_prerequisites()
-                missing = [k for k, v in env_status.items() if v == "MISSING" and k not in ["is_ready", "codex"]]
+                missing_runtime = [k for k in ("python", "node", "npm") if env_status.get(k) == "MISSING"]
                 
                 # 1. Cài đặt Python/Node nếu thiếu
-                if missing:
-                    self.env_manager.install_missing_env(missing)
+                if missing_runtime:
+                    if not auto_install_runtime:
+                        raise Exception(
+                            "Thiếu runtime hệ thống và server đang tắt auto-install. "
+                            "Vui lòng cài thủ công rồi thử lại."
+                        )
+                    installed = self.env_manager.install_missing_env(missing_runtime, install_policy)
+                    if not installed:
+                        raise Exception("Không thể cài đặt runtime tự động.")
+
+                    # Recheck để đảm bảo cài đặt thực sự thành công.
+                    recheck = self.env_manager.check_prerequisites()
+                    still_missing = [k for k in ("python", "node", "npm") if recheck.get(k) == "MISSING"]
+                    if still_missing:
+                        raise Exception(f"Thiếu runtime sau khi cài: {', '.join(still_missing)}")
                 
-                # 2. Tải và cài đặt Codex từ API Server
-                import requests
-                api_url = f"{ConfigManager.get('OMNIMIND_API_URL', 'http://localhost:8050')}/api/v1/omnimind/codex/releases"
-                resp = requests.get(api_url, timeout=10)
-                if resp.status_code == 200:
-                    data = resp.json()
-                    platform_key = "darwin" if self.env_manager.os_name == "Darwin" else "win32"
-                    if platform_key in data.get("platforms", {}):
-                        dl_url = data["platforms"][platform_key]["url"]
-                        success = self.env_manager.download_and_install_codex(dl_url)
-                        if success:
-                            # Chạy UI update từ Main Thread
-                            from PyQt5.QtCore import QTimer
-                            QTimer.singleShot(0, self._on_download_complete)
-                        else:
-                            raise Exception("Không giải nén được Codex.")
-                    else:
-                        raise Exception("HĐH không được hỗ trợ Codex.")
-                else:
-                    raise Exception("Không thể gọi API lấy link tải Codex.")
+                # 2. Tải và cài đặt Codex từ release manifest (server first, local fallback)
+                platform_key = self.env_manager.get_platform_key()
+                platform_data = release_manifest.get("platforms", {}).get(platform_key, {})
+                dl_url = (platform_data.get("url") or "").strip()
+                if not dl_url:
+                    raise Exception(f"HĐH không được hỗ trợ Codex ({platform_key}).")
+
+                success = self.env_manager.download_and_install_codex(dl_url)
+                if not success:
+                    raise Exception("Không tải/cài được Codex CLI.")
+
+                # Chạy UI update từ Main Thread
+                from PyQt5.QtCore import QTimer
+                QTimer.singleShot(0, self._on_download_complete)
             except Exception as e:
                 logger.error(f"Install worker error: {e}")
                 from PyQt5.QtCore import QTimer
-                QTimer.singleShot(0, lambda: self._set_codex_error(f"Lỗi: {str(e)[:40]}"))
+                QTimer.singleShot(0, lambda: self._on_download_failed(f"Lỗi: {str(e)[:80]}"))
 
         threading.Thread(target=install_worker, daemon=True).start()
 
@@ -493,6 +513,24 @@ class AuthPage(QWidget):
         self.codex_status_label.setText("Đã cài đặt · Chưa xác thực")
         self.codex_status_label.setStyleSheet("font-size: 14px; font-weight: 600; color: #F59E0B;")
         self.codex_hint.setText("Cài đặt thành công! Nhấn xác thực để đăng nhập tài khoản Codex.")
+
+    def _on_download_failed(self, msg: str):
+        """Reset UI đúng trạng thái khi tải/cài Codex lỗi."""
+        self.codex_download_btn.setEnabled(True)
+        self.codex_download_btn.setText("  Tải bộ não AI")
+        self.codex_status_icon.setText("🔴")
+        self.codex_status_label.setText(msg)
+        self.codex_status_label.setStyleSheet("font-size: 14px; font-weight: 600; color: #EF4444;")
+        self.codex_hint.setText("Không thể hoàn tất cài đặt Codex. Vui lòng kiểm tra mạng/quyền hệ thống và thử lại.")
+
+        try:
+            env_status = self.env_manager.check_prerequisites() if self.env_manager else {}
+        except Exception:
+            env_status = {}
+
+        codex_ready = env_status.get("codex_ready", env_status.get("codex") == "OK")
+        self.codex_download_btn.setVisible(not codex_ready)
+        self.codex_verify_btn.setVisible(codex_ready)
 
     def _verify_codex(self):
         """Kiểm tra xác thực Codex CLI sử dụng EnvironmentManager."""
@@ -552,9 +590,17 @@ class AuthPage(QWidget):
         self.codex_verify_btn.setIcon(Icons.check_circle("#FFFFFF", 16))
         self.codex_verify_btn.style().unpolish(self.codex_verify_btn)
         self.codex_verify_btn.style().polish(self.codex_verify_btn)
-        self.codex_verify_btn.setVisible(True)
         self.codex_logout_btn.setVisible(False)
         self.codex_hint.setText("Chưa đăng nhập hoặc phiên đăng nhập đã hết hạn. Vui lòng xác thực lại.")
+        try:
+            env_status = self.env_manager.check_prerequisites() if self.env_manager else {}
+        except Exception:
+            env_status = {}
+        codex_ready = env_status.get("codex_ready", env_status.get("codex") == "OK")
+        self.codex_verify_btn.setVisible(codex_ready)
+        self.codex_download_btn.setVisible(not codex_ready)
+        self.codex_download_btn.setEnabled(True)
+        self.codex_download_btn.setText("  Tải bộ não AI")
         ConfigManager.set("codex_auth_status", "unverified")
 
     def _logout_codex(self):
