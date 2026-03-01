@@ -221,6 +221,43 @@ class EnvironmentManager:
             logger.exception("Unexpected error during Codex auth verification")
             return {"success": False, "message": f"Lỗi xác thực: {str(e)[:50]}"}
 
+    def login_codex(self) -> dict:
+        """
+        Thực hiện lệnh đăng nhập Codex CLI.
+        """
+        try:
+            codex_cmd = shutil.which("codex", path=str(self.codex_bin_dir)) or "codex"
+            result = subprocess.run(
+                [codex_cmd, "login"],
+                capture_output=True,
+                text=True,
+                timeout=180,
+                stdin=subprocess.DEVNULL,
+            )
+
+            output = (result.stdout or "").strip()
+            err = (result.stderr or "").strip()
+            output_lower = output.lower()
+            err_lower = err.lower()
+
+            if result.returncode == 0:
+                return {"success": True, "message": output or "Đăng nhập Codex thành công."}
+
+            if "already logged in" in output_lower or "already logged in" in err_lower:
+                return {"success": True, "message": output or err or "Codex đã đăng nhập."}
+
+            return {
+                "success": False,
+                "message": err or output or "Không thể đăng nhập Codex CLI.",
+            }
+        except subprocess.TimeoutExpired:
+            return {
+                "success": False,
+                "message": "Đăng nhập Codex quá thời gian chờ. Vui lòng thử lại.",
+            }
+        except Exception as e:
+            return {"success": False, "message": f"Lỗi hệ thống: {str(e)[:50]}"}
+
     def logout_codex(self) -> dict:
         """
         Thực hiện đăng xuất tài khoản trong CLI.

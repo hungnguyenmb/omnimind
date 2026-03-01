@@ -28,6 +28,14 @@ class CodexVerifyWorker(QThread):
     def run(self):
         try:
             result = self.env_manager.verify_codex_auth()
+            if not result.get("success"):
+                message = (result.get("message") or "").lower()
+                if "chưa đăng nhập" in message:
+                    login_result = self.env_manager.login_codex()
+                    if login_result.get("success"):
+                        result = self.env_manager.verify_codex_auth()
+                    else:
+                        result = login_result
         except Exception as e:
             logger.exception("Codex verify worker failed")
             result = {"success": False, "message": f"Lỗi: {str(e)[:40]}"}
@@ -551,9 +559,22 @@ class AuthPage(QWidget):
 
     def _logout_codex(self):
         """Xóa trạng thái xác thực trong CLI và Database."""
-        if self.env_manager:
-            self.env_manager.logout_codex()
-            
+        if not self.env_manager:
+            self.codex_status_icon.setText("🔴")
+            self.codex_status_label.setText("Lỗi môi trường, không thể đăng xuất")
+            self.codex_status_label.setStyleSheet("font-size: 14px; font-weight: 600; color: #EF4444;")
+            self.codex_logout_btn.setVisible(True)
+            return
+
+        result = self.env_manager.logout_codex()
+        if not result.get("success"):
+            self.codex_status_icon.setText("🔴")
+            self.codex_status_label.setText(result.get("message", "Đăng xuất thất bại"))
+            self.codex_status_label.setStyleSheet("font-size: 14px; font-weight: 600; color: #EF4444;")
+            self.codex_logout_btn.setVisible(True)
+            self.codex_hint.setText("Không thể đăng xuất Codex CLI. Vui lòng thử lại.")
+            return
+
         self.codex_status_icon.setText("🟡")
         self.codex_status_label.setText("Đã cài đặt · Chưa xác thực")
         self.codex_status_label.setStyleSheet("font-size: 14px; font-weight: 600; color: #F59E0B;")

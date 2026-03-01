@@ -11,12 +11,14 @@ from PyQt5.QtWidgets import (
 from PyQt5.QtCore import Qt
 from PyQt5.QtGui import QColor
 from ui.icons import Icons
+from engine.memory_manager import MemoryManager
 
 
 class RuleDialog(QDialog):
     """Popup soạn thảo quy tắc (Thêm mới / Sửa). Kích thước lớn cho dễ nhập liệu."""
-    def __init__(self, parent=None, title="", content="", is_active=True, mode="add"):
+    def __init__(self, parent=None, rule_id=None, title="", content="", is_active=True, mode="add"):
         super().__init__(parent)
+        self.rule_id = rule_id
         self.setWindowTitle("Thêm Quy Tắc Mới" if mode == "add" else "Sửa Quy Tắc")
         self.setMinimumSize(640, 520)
         self.resize(700, 560)
@@ -92,13 +94,15 @@ class RuleDialog(QDialog):
         is_active = True
         if self.status_combo:
             is_active = self.status_combo.currentIndex() == 0
-        return self.title_input.text().strip(), self.content_input.toPlainText().strip(), is_active
+        return self.rule_id, self.title_input.text().strip(), self.content_input.toPlainText().strip(), is_active
 
 
 class MemoryPage(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
+        self.memory_mgr = MemoryManager()
         self._setup_ui()
+        self._load_rules()
 
     def _setup_ui(self):
         layout = QVBoxLayout(self)
@@ -165,37 +169,37 @@ class MemoryPage(QWidget):
         self.table.setMinimumHeight(300)
         self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
 
-        # Dữ liệu mẫu (demo UI)
-        self._sample_data = [
-            ("Nguyên tắc An toàn", "Luôn kiểm tra kỹ trước khi thực thi lệnh xóa hoặc sửa file hệ thống.", True),
-            ("Quy tắc Báo cáo", "Sau mỗi tác vụ, gửi tóm tắt kết quả qua Telegram cho người dùng.", True),
-            ("Quy tắc Skill", "Khi tạo skill mới, in tag [NEW_SKILL] kèm JSON để App tự động lưu.", True),
-        ]
-        self._populate_table()
+        self._rules_data = []
+        # self._populate_table() # Will be called by _load_rules
 
         card_layout.addWidget(self.table)
         layout.addWidget(table_card)
         layout.addStretch()
 
+    def _load_rules(self):
+        """Tải dữ liệu quy tắc từ DB."""
+        self._rules_data = self.memory_mgr.get_all_rules()
+        self._populate_table()
+
     def _populate_table(self):
-        self.table.setRowCount(len(self._sample_data))
-        for i, (t, c, active) in enumerate(self._sample_data):
+        self.table.setRowCount(len(self._rules_data))
+        for i, rule in enumerate(self._rules_data):
             # STT
             stt_item = QTableWidgetItem(str(i + 1))
             stt_item.setTextAlignment(Qt.AlignCenter)
             self.table.setItem(i, 0, stt_item)
 
             # Tiêu đề
-            title_item = QTableWidgetItem(t)
+            title_item = QTableWidgetItem(rule["title"])
             self.table.setItem(i, 1, title_item)
 
             # Nội dung
-            content_item = QTableWidgetItem(c)
-            content_item.setToolTip(c)
+            content_item = QTableWidgetItem(rule["content"])
+            content_item.setToolTip(rule["content"])
             self.table.setItem(i, 2, content_item)
 
             # Trạng thái
-            status_item = QTableWidgetItem("🟢 On" if active else "🔴 Off")
+            status_item = QTableWidgetItem("🟢 On" if rule["is_active"] else "🔴 Off")
             status_item.setTextAlignment(Qt.AlignCenter)
             self.table.setItem(i, 3, status_item)
 
@@ -228,34 +232,40 @@ class MemoryPage(QWidget):
     def _show_add_dialog(self):
         dialog = RuleDialog(self, mode="add")
         if dialog.exec_() == QDialog.Accepted:
-            title, content, _ = dialog.get_data()
+            _, title, content, is_active = dialog.get_data()
             if title and content:
-                self._sample_data.append((title, content, True))
-                self._populate_table()
+                if self.memory_mgr.add_rule(title, content, is_active):
+                    self._load_rules()
+                else:
+                    QMessageBox.warning(self, "Lỗi", "Không thể lưu quy tắc vào database.")
 
     def _show_edit_dialog(self, row):
-        if row >= len(self._sample_data):
+        if row >= len(self._rules_data):
             return
-        t, c, active = self._sample_data[row]
-        dialog = RuleDialog(self, title=t, content=c, is_active=active, mode="edit")
+        rule = self._rules_data[row]
+        dialog = RuleDialog(self, rule_id=rule["id"], title=rule["title"], content=rule["content"], is_active=rule["is_active"], mode="edit")
         if dialog.exec_() == QDialog.Accepted:
-            new_title, new_content, new_active = dialog.get_data()
+            rule_id, new_title, new_content, new_active = dialog.get_data()
             if new_title and new_content:
-                self._sample_data[row] = (new_title, new_content, new_active)
-                self._populate_table()
+                if self.memory_mgr.update_rule(rule_id, new_title, new_content, new_active):
+                    self._load_rules()
+                else:
+                    QMessageBox.warning(self, "Lỗi", "Không thể cập nhật quy tắc.")
 
     def _confirm_delete(self, row):
-        if row >= len(self._sample_data):
+        if row >= len(self._rules_data):
             return
-        title = self._sample_data[row][0]
+        rule = self._rules_data[row]
         reply = QMessageBox.question(
             self,
             "Xác nhận Xoá",
-            f"Bạn có chắc chắn muốn xoá quy tắc \"{title}\" không?\n\n"
+            f"Bạn có chắc chắn muốn xoá quy tắc \"{rule['title']}\" không?\n\n"
             f"Hành động này không thể hoàn tác.",
             QMessageBox.Yes | QMessageBox.No,
             QMessageBox.No
         )
         if reply == QMessageBox.Yes:
-            del self._sample_data[row]
-            self._populate_table()
+            if self.memory_mgr.delete_rule(rule["id"]):
+                self._load_rules()
+            else:
+                QMessageBox.warning(self, "Lỗi", "Không thể xoá quy tắc.")
