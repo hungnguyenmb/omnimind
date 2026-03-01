@@ -27,7 +27,9 @@ class SkillManager:
     def __init__(self):
         self.api_base_url = self._get_api_base_url()
         self.os_name = platform.system()
-        self.codex_home = Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex")))
+        self.codex_home = Path(ConfigManager.get_codex_home())
+        # Đồng bộ env trong runtime để Codex CLI và skill installer dùng cùng 1 home.
+        os.environ["CODEX_HOME"] = str(self.codex_home)
         self.skills_dir = self.codex_home / "skills"
         self.skills_dir.mkdir(parents=True, exist_ok=True)
 

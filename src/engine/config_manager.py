@@ -1,4 +1,6 @@
 import logging
+import os
+from pathlib import Path
 from database.db_manager import db
 
 logger = logging.getLogger(__name__)
@@ -56,3 +58,39 @@ class ConfigManager:
     @classmethod
     def set_workspace_path(cls, path: str):
         cls.set("workspace_path", path)
+
+    @classmethod
+    def get_codex_home(cls) -> str:
+        """
+        Resolve CODEX_HOME theo thứ tự ưu tiên:
+        1) ENV CODEX_HOME
+        2) DB app_configs: codex_home / CODEX_HOME
+        3) Mặc định ~/.codex
+        """
+        env_val = os.environ.get("CODEX_HOME", "").strip()
+        if env_val:
+            return str(Path(env_val).expanduser())
+
+        cfg_val = (cls.get("codex_home", "").strip() or cls.get("CODEX_HOME", "").strip())
+        if cfg_val:
+            return str(Path(cfg_val).expanduser())
+
+        return str(Path.home() / ".codex")
+
+    @classmethod
+    def set_codex_home(cls, path: str):
+        normalized = str(Path(path).expanduser())
+        cls.set("codex_home", normalized)
+        cls.set("CODEX_HOME", normalized)
+
+    @classmethod
+    def get_sandbox_mode(cls) -> str:
+        """
+        Chuẩn hóa lựa chọn Sandbox UI thành mode dùng cho runtime/env.
+        """
+        val = cls.get("sandbox_permission", "").strip()
+        if "read-only" in val.lower() or "chỉ đọc" in val.lower():
+            return "read-only"
+        if "full" in val.lower() or "danger" in val.lower() or "toàn quyền" in val.lower():
+            return "danger-full-access"
+        return "workspace-write"

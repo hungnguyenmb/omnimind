@@ -2,6 +2,7 @@
 OmniMind - Main Window
 Sidebar Navigation kèm Icon, System Tray, và Routing giữa các Tab Pages.
 """
+import os
 from PyQt5.QtWidgets import (
     QMainWindow, QWidget, QHBoxLayout, QVBoxLayout, 
     QPushButton, QStackedWidget, QLabel, QFrame,
@@ -16,11 +17,16 @@ from ui.pages.auth_page import AuthPage
 from ui.pages.memory_page import MemoryPage
 from ui.pages.vault_page import VaultPage
 from ui.pages.skill_store_page import SkillStorePage
+from engine.config_manager import ConfigManager
 
 
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
+        self.app_version = (
+            ConfigManager.get("app_current_version", "").strip()
+            or os.environ.get("OMNIMIND_APP_VERSION", "1.0.0")
+        )
         self.setWindowTitle("OmniMind - Pro AI Assistant")
         self.resize(1180, 780)
         self.setMinimumSize(960, 680)
@@ -85,7 +91,7 @@ class MainWindow(QMainWindow):
         sidebar_layout.addStretch()
         
         # Version footer
-        version_lbl = QLabel("v1.0.0 Pro")
+        version_lbl = QLabel(f"v{self.app_version} Pro")
         version_lbl.setObjectName("VersionLabel")
         version_lbl.setAlignment(Qt.AlignCenter)
         sidebar_layout.addWidget(version_lbl)

@@ -1,7 +1,7 @@
 import logging
-import requests
 import platform
 from engine.config_manager import ConfigManager
+from engine.update_manager import UpdateManager
 
 logger = logging.getLogger(__name__)
 
@@ -14,6 +14,7 @@ class DashboardManager:
 
     def __init__(self):
         self.api_base_url = ConfigManager.get("OMNIMIND_API_URL", "http://localhost:8050")
+        self.update_mgr = UpdateManager()
 
     def get_license_display_info(self) -> dict:
         """Lấy thông tin bản quyền để hiển thị trên Dashboard."""
@@ -28,34 +29,22 @@ class DashboardManager:
             "status": f"{status_dot} {status_text}"
         }
 
-    def check_for_updates(self, current_version: str = "1.0.0") -> dict:
+    def get_current_version(self) -> str:
+        return self.update_mgr.get_current_version()
+
+    def check_for_updates(self, current_version=None) -> dict:
         """
         Gọi API kiểm tra version mới nhất.
         Returns: { "has_update": bool, "latest_version": str, "changelog": list, ... }
         """
-        url = f"{self.api_base_url}/api/v1/omnimind/app/version"
-        try:
-            response = requests.get(url, timeout=10)
-            if response.status_code == 200:
-                data = response.json()
-                latest_v = data.get("latest_version")
-                
-                # Logic so sánh version đơn giản (có thể cải thiện bằng packaging.version)
-                has_update = latest_v and latest_v != current_version
-                
-                return {
-                    "success": True,
-                    "has_update": has_update,
-                    "latest_version": latest_v,
-                    "version_name": data.get("version_name"),
-                    "download_url": data.get("download_url"),
-                    "changelogs": data.get("changelogs", []),
-                    "is_critical": data.get("is_critical", False)
-                }
-            return {"success": False, "message": "Không nhận được phản hồi từ Server."}
-        except Exception as e:
-            logger.error(f"Version check error: {e}")
-            return {"success": False, "message": str(e)}
+        return self.update_mgr.check_for_updates(self.api_base_url, current_version)
+
+    def install_update(self, download_url: str, target_version: str, progress_callback=None) -> dict:
+        return self.update_mgr.download_and_install_update(
+            download_url=download_url,
+            target_version=target_version,
+            progress_callback=progress_callback,
+        )
 
     def get_system_info(self) -> dict:
         """Lấy thông tin hệ thống cho Dashboard."""

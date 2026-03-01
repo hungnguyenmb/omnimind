@@ -5,7 +5,7 @@ Form Token Telegram, Workspace Path, Sandbox Permission, Auto-start.
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QLineEdit, QComboBox, QFrame, QGraphicsDropShadowEffect,
-    QCheckBox, QFileDialog, QScrollArea
+    QCheckBox, QFileDialog, QScrollArea, QMessageBox, QProgressBar
 )
 from PyQt5.QtCore import Qt, QThread, pyqtSignal
 from PyQt5.QtGui import QColor
@@ -42,10 +42,91 @@ class CodexVerifyWorker(QThread):
         self.finished.emit(result)
 
 
+class RuntimeInstallWorker(QThread):
+    progress = pyqtSignal(int, str)
+    finished = pyqtSignal(dict)
+
+    def __init__(self, env_manager, component: str, install_policy: dict, parent=None):
+        super().__init__(parent)
+        self.env_manager = env_manager
+        self.component = component
+        self.install_policy = install_policy or {}
+
+    def run(self):
+        try:
+            self.progress.emit(5, f"Đang chuẩn bị cài đặt {self.component}...")
+            ok = self.env_manager.install_missing_env(
+                [self.component],
+                self.install_policy,
+                progress_callback=lambda pct, msg: self.progress.emit(pct, msg),
+            )
+            recheck = self.env_manager.check_prerequisites()
+            status = recheck.get(self.component)
+            success = bool(ok and status == "OK")
+            if not success and self.component == "npm":
+                # npm đi kèm Node ở nhiều nền tảng
+                success = bool(ok and recheck.get("node") == "OK" and recheck.get("npm") == "OK")
+
+            self.finished.emit({
+                "success": success,
+                "component": self.component,
+                "status": recheck,
+                "message": "Cài đặt thành công." if success else f"Không thể cài {self.component}.",
+            })
+        except Exception as e:
+            logger.exception("Runtime install worker failed")
+            self.finished.emit({
+                "success": False,
+                "component": self.component,
+                "message": f"Lỗi cài đặt {self.component}: {str(e)[:80]}",
+            })
+
+
+class CodexInstallWorker(QThread):
+    progress = pyqtSignal(int, str)
+    finished = pyqtSignal(dict)
+
+    def __init__(self, env_manager, release_manifest: dict, parent=None):
+        super().__init__(parent)
+        self.env_manager = env_manager
+        self.release_manifest = release_manifest or {}
+
+    def run(self):
+        try:
+            platform_key = self.env_manager.get_platform_key()
+            platform_data = self.release_manifest.get("platforms", {}).get(platform_key, {})
+            dl_url = (platform_data.get("url") or "").strip()
+            if not dl_url:
+                self.finished.emit({
+                    "success": False,
+                    "message": f"HĐH không được hỗ trợ Codex ({platform_key}).",
+                })
+                return
+
+            ok = self.env_manager.download_and_install_codex(
+                dl_url,
+                progress_callback=lambda pct, msg: self.progress.emit(pct, msg),
+            )
+            self.finished.emit({
+                "success": bool(ok),
+                "message": "Cài đặt Codex thành công." if ok else "Không tải/cài được Codex CLI.",
+            })
+        except Exception as e:
+            logger.exception("Codex install worker failed")
+            self.finished.emit({"success": False, "message": f"Lỗi cài Codex: {str(e)[:80]}"})
+
+
 class AuthPage(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._verify_worker = None
+        self._runtime_worker = None
+        self._codex_install_worker = None
+        self._missing_runtime = []
+        self._runtime_installing = False
+        self._codex_installing = False
+        self._runtime_installer_ready = False
+        self._runtime_installer_info = {}
         try:
             self.env_manager = EnvironmentManager()
         except Exception as e:
@@ -207,6 +288,41 @@ class AuthPage(QWidget):
         self.codex_hint.setWordWrap(True)
         codex_layout.addWidget(self.codex_hint)
 
+        self.runtime_missing_box = QFrame()
+        self.runtime_missing_box.setStyleSheet(
+            "QFrame { background: #F8FAFC; border: 1px solid #E2E8F0; border-radius: 12px; }"
+        )
+        runtime_box_layout = QVBoxLayout(self.runtime_missing_box)
+        runtime_box_layout.setContentsMargins(12, 10, 12, 10)
+        runtime_box_layout.setSpacing(8)
+        self.runtime_missing_title = QLabel("Thiếu môi trường runtime")
+        self.runtime_missing_title.setStyleSheet("font-size: 13px; font-weight: 700; color: #0F172A;")
+        runtime_box_layout.addWidget(self.runtime_missing_title)
+        self.runtime_missing_list_layout = QVBoxLayout()
+        self.runtime_missing_list_layout.setSpacing(6)
+        runtime_box_layout.addLayout(self.runtime_missing_list_layout)
+        self.runtime_missing_box.setVisible(False)
+        codex_layout.addWidget(self.runtime_missing_box)
+
+        self.runtime_installer_label = QLabel("")
+        self.runtime_installer_label.setStyleSheet("font-size: 12px; color: #64748B;")
+        self.runtime_installer_label.setWordWrap(True)
+        self.runtime_installer_label.setVisible(False)
+        codex_layout.addWidget(self.runtime_installer_label)
+
+        self.codex_progress = QProgressBar()
+        self.codex_progress.setRange(0, 100)
+        self.codex_progress.setValue(0)
+        self.codex_progress.setVisible(False)
+        self.codex_progress.setFixedHeight(18)
+        codex_layout.addWidget(self.codex_progress)
+
+        self.codex_progress_text = QLabel("")
+        self.codex_progress_text.setStyleSheet("font-size: 12px; color: #64748B;")
+        self.codex_progress_text.setWordWrap(True)
+        self.codex_progress_text.setVisible(False)
+        codex_layout.addWidget(self.codex_progress_text)
+
         layout.addWidget(codex_card)
 
         # Auto-check khi khởi động
@@ -299,6 +415,184 @@ class AuthPage(QWidget):
         lbl.setStyleSheet("font-size: 13px; font-weight: 600; color: #64748B;")
         return lbl
 
+    def _clear_layout(self, layout):
+        while layout.count():
+            item = layout.takeAt(0)
+            widget = item.widget()
+            child_layout = item.layout()
+            if widget:
+                widget.deleteLater()
+            elif child_layout:
+                self._clear_layout(child_layout)
+
+    def _runtime_display_name(self, key: str) -> str:
+        mapping = {
+            "python": "Python",
+            "node": "Node.js",
+            "npm": "npm",
+        }
+        return mapping.get(key, key)
+
+    def _set_progress(self, visible: bool, value: int = 0, message: str = ""):
+        self.codex_progress.setVisible(visible)
+        self.codex_progress_text.setVisible(visible)
+        if visible:
+            self.codex_progress.setValue(max(0, min(100, int(value))))
+            self.codex_progress_text.setText(message)
+        else:
+            self.codex_progress.setValue(0)
+            self.codex_progress_text.setText("")
+
+    def _refresh_runtime_installer_status(self, runtime_missing: list):
+        self._runtime_installer_info = {}
+        self._runtime_installer_ready = False
+
+        if not self.env_manager:
+            self.runtime_installer_label.setVisible(False)
+            return
+
+        info = self.env_manager.get_runtime_installer_status()
+        self._runtime_installer_info = info
+        self._runtime_installer_ready = bool(info.get("ready"))
+
+        if not runtime_missing:
+            # Không cần runtime installer nếu không còn runtime thiếu.
+            self.runtime_installer_label.setVisible(False)
+            return
+
+        display = info.get("display_name", "Installer")
+        msg = info.get("message", "")
+        hint = info.get("manual_hint", "")
+        if self._runtime_installer_ready:
+            text = f"✅ Công cụ cài runtime tự động: {display} · {msg}"
+            color = "#10B981"
+        else:
+            text = f"❌ Công cụ cài runtime tự động: {display} · {msg}"
+            if hint:
+                text += f" Gợi ý: {hint}"
+            color = "#EF4444"
+
+        self.runtime_installer_label.setText(text)
+        self.runtime_installer_label.setStyleSheet(f"font-size: 12px; color: {color};")
+        self.runtime_installer_label.setVisible(True)
+
+    def _show_missing_runtime_actions(self, missing_runtime: list):
+        self._missing_runtime = list(missing_runtime or [])
+        self._clear_layout(self.runtime_missing_list_layout)
+        self._refresh_runtime_installer_status(self._missing_runtime)
+
+        if not self._missing_runtime:
+            self.runtime_missing_box.setVisible(False)
+            return
+
+        for runtime in self._missing_runtime:
+            row = QHBoxLayout()
+            row.setSpacing(8)
+
+            left = QLabel(f"- {self._runtime_display_name(runtime)}")
+            left.setStyleSheet("font-size: 13px; color: #334155;")
+            row.addWidget(left)
+            row.addStretch()
+
+            btn = QPushButton("Cài đặt")
+            btn.setObjectName("SecondaryBtn")
+            btn.setCursor(Qt.PointingHandCursor)
+            btn.setFixedHeight(30)
+            btn.setMinimumWidth(100)
+            btn.clicked.connect(lambda _=False, dep=runtime: self._request_runtime_install(dep))
+            if self._runtime_installing or self._codex_installing or not self._runtime_installer_ready:
+                btn.setEnabled(False)
+            if not self._runtime_installer_ready:
+                btn.setToolTip("Thiếu công cụ cài tự động theo HĐH. Xem hướng dẫn bên dưới.")
+            row.addWidget(btn)
+            self.runtime_missing_list_layout.addLayout(row)
+
+        self.runtime_missing_box.setVisible(True)
+
+    def _confirm_privileged_action(self, title: str, reason: str) -> bool:
+        answer = QMessageBox.question(
+            self,
+            title,
+            reason,
+            QMessageBox.Ok | QMessageBox.Cancel,
+            QMessageBox.Ok,
+        )
+        return answer == QMessageBox.Ok
+
+    def _request_runtime_install(self, component: str):
+        if not self.env_manager or self._runtime_installing or self._codex_installing:
+            return
+
+        if not self._runtime_installer_ready:
+            info = self._runtime_installer_info or {}
+            title = info.get("display_name", "Installer")
+            hint = info.get("manual_hint", "Vui lòng cài runtime thủ công.")
+            QMessageBox.warning(
+                self,
+                "Không thể cài tự động",
+                (
+                    f"Thiếu công cụ cài đặt tự động ({title}).\n\n"
+                    f"{info.get('message', '')}\n"
+                    f"Gợi ý: {hint}"
+                ),
+            )
+            return
+
+        friendly = self._runtime_display_name(component)
+        ok = self._confirm_privileged_action(
+            f"Cài đặt {friendly}",
+            (
+                f"Hệ thống cần cài {friendly} để Codex CLI hoạt động.\n\n"
+                "Tiến trình có thể yêu cầu quyền quản trị (Admin/UAC/Sudo).\n"
+                "Nhấn OK để tiếp tục, hoặc Cancel để huỷ."
+            ),
+        )
+        if not ok:
+            return
+
+        release_manifest = self.env_manager.fetch_codex_release_manifest()
+        install_policy = release_manifest.get("install_policy", {})
+
+        self._runtime_installing = True
+        self.codex_download_btn.setEnabled(False)
+        self.codex_verify_btn.setEnabled(False)
+        self.codex_status_icon.setText("🟡")
+        self.codex_status_label.setText(f"Đang cài đặt {friendly}...")
+        self.codex_status_label.setStyleSheet("font-size: 14px; font-weight: 600; color: #3B82F6;")
+        self._set_progress(True, 5, f"Khởi tạo cài đặt {friendly}...")
+        self._show_missing_runtime_actions(self._missing_runtime)
+
+        self._runtime_worker = RuntimeInstallWorker(self.env_manager, component, install_policy, self)
+        self._runtime_worker.progress.connect(self._on_runtime_progress)
+        self._runtime_worker.finished.connect(self._on_runtime_finished)
+        self._runtime_worker.start()
+
+    def _on_runtime_progress(self, percent: int, message: str):
+        self._set_progress(True, percent, message)
+
+    def _on_runtime_finished(self, result: dict):
+        self._runtime_installing = False
+        self._runtime_worker = None
+        self.codex_download_btn.setEnabled(True)
+        self.codex_verify_btn.setEnabled(True)
+
+        env_status = result.get("status") or (self.env_manager.check_prerequisites() if self.env_manager else {})
+        missing_runtime = [k for k in ("python", "node", "npm") if env_status.get(k) == "MISSING"]
+        self._show_missing_runtime_actions(missing_runtime)
+
+        if result.get("success"):
+            self.codex_status_icon.setText("🟡")
+            self.codex_status_label.setText(result.get("message", "Cài đặt môi trường thành công."))
+            self.codex_status_label.setStyleSheet("font-size: 14px; font-weight: 600; color: #F59E0B;")
+            self._set_progress(True, 100, "Đã hoàn tất. Bạn có thể cài thành phần tiếp theo hoặc tải Codex.")
+        else:
+            self.codex_status_icon.setText("🔴")
+            self.codex_status_label.setText(result.get("message", "Cài đặt môi trường thất bại."))
+            self.codex_status_label.setStyleSheet("font-size: 14px; font-weight: 600; color: #EF4444;")
+            self._set_progress(True, 100, "Tiến trình dừng do lỗi. Vui lòng thử lại.")
+
+        self._check_codex_installed()
+
     def _browse_folder(self):
         folder = QFileDialog.getExistingDirectory(self, "Chọn Workspace")
         if folder:
@@ -383,6 +677,7 @@ class AuthPage(QWidget):
             self.codex_status_label.setText("Lỗi khởi tạo Environment Manager")
             self.codex_status_label.setStyleSheet("font-size: 14px; font-weight: 600; color: #EF4444;")
             self.codex_hint.setText("Không thể kiểm tra môi trường. Vui lòng khởi động lại ứng dụng.")
+            self._show_missing_runtime_actions([])
             return
         try:
             env_status = self.env_manager.check_prerequisites()
@@ -392,10 +687,12 @@ class AuthPage(QWidget):
             self.codex_status_label.setText("Lỗi kiểm tra môi trường")
             self.codex_status_label.setStyleSheet("font-size: 14px; font-weight: 600; color: #EF4444;")
             self.codex_hint.setText(f"Chi tiết lỗi: {str(e)[:60]}")
+            self._show_missing_runtime_actions([])
             return
 
         codex_ready = env_status.get("codex_ready", env_status.get("codex") == "OK")
         runtime_missing = [k for k in ("python", "node", "npm") if env_status.get(k) == "MISSING"]
+        self._show_missing_runtime_actions(runtime_missing)
 
         if codex_ready:
             # Kiểm tra xem trước đó đã xác thực chưa
@@ -442,72 +739,110 @@ class AuthPage(QWidget):
             self.codex_status_label.setStyleSheet("font-size: 14px; font-weight: 600; color: #EF4444;")
             self.codex_download_btn.setVisible(True)
             self.codex_verify_btn.setVisible(False)
-            
-            hint_txt = "Thiết bị thiếu các thành phần bắt buộc. Nhấn \"Tải bộ não AI\" để cài đặt tự động (Cần cấp quyền Admin)."
+
+            if runtime_missing:
+                hint_txt = (
+                    "Nhấn \"Tải bộ não AI\" để kiểm tra môi trường và hiện danh sách cài đặt từng thành phần.\n"
+                    "Bạn có thể chọn cài Python/Node/npm theo thứ tự mong muốn."
+                )
+            else:
+                hint_txt = (
+                    "Runtime đã đủ. Nhấn \"Tải bộ não AI\" để bắt đầu tải và cài Codex CLI."
+                )
             self.codex_hint.setText(hint_txt)
 
+        if not self._runtime_installing and not self._codex_installing:
+            self._set_progress(False)
+
     def _download_codex(self):
-        """Tải và cài đặt Môi trường (nếu thiếu) sau đó tải Codex CLI."""
+        """Kiểm tra runtime; nếu đủ thì tải Codex, nếu thiếu thì hiện list cài từng mục."""
+        if not self.env_manager or self._runtime_installing or self._codex_installing:
+            return
+
+        try:
+            env_status = self.env_manager.check_prerequisites()
+        except Exception as e:
+            self._on_download_failed(f"Lỗi kiểm tra môi trường: {str(e)[:80]}")
+            return
+
+        runtime_missing = [k for k in ("python", "node", "npm") if env_status.get(k) == "MISSING"]
+        codex_ready = env_status.get("codex_ready", env_status.get("codex") == "OK")
+        self._show_missing_runtime_actions(runtime_missing)
+
+        if runtime_missing:
+            missing_text = ", ".join(self._runtime_display_name(k) for k in runtime_missing)
+            self.codex_status_icon.setText("🟡")
+            self.codex_status_label.setText("Vui lòng cài runtime trước khi tải Codex")
+            self.codex_status_label.setStyleSheet("font-size: 14px; font-weight: 600; color: #F59E0B;")
+            if self._runtime_installer_ready:
+                self.codex_hint.setText(
+                    f"Đang thiếu: {missing_text}. Nhấn nút \"Cài đặt\" ở từng mục phía dưới theo thứ tự bạn muốn."
+                )
+            else:
+                installer = self._runtime_installer_info.get("display_name", "installer")
+                hint = self._runtime_installer_info.get("manual_hint", "Cài thủ công Python/Node/npm.")
+                self.codex_hint.setText(
+                    f"Đang thiếu: {missing_text}. Auto-install chưa khả dụng vì thiếu {installer}. {hint}"
+                )
+            self._set_progress(False)
+            return
+
+        if codex_ready:
+            self.codex_status_icon.setText("🟢")
+            self.codex_status_label.setText("Codex đã được cài đặt")
+            self.codex_status_label.setStyleSheet("font-size: 14px; font-weight: 600; color: #10B981;")
+            self.codex_hint.setText("Codex CLI đã có sẵn. Bạn có thể nhấn xác thực tài khoản.")
+            self.codex_download_btn.setVisible(False)
+            self.codex_verify_btn.setVisible(True)
+            self._set_progress(False)
+            return
+
+        ok = self._confirm_privileged_action(
+            "Tải bộ não AI (Codex CLI)",
+            (
+                "Ứng dụng sẽ tải và cài Codex CLI vào máy.\n\n"
+                "Tiến trình có thể yêu cầu quyền hệ thống trên một số môi trường.\n"
+                "Nhấn OK để tiếp tục hoặc Cancel để dừng."
+            ),
+        )
+        if not ok:
+            return
+
+        release_manifest = self.env_manager.fetch_codex_release_manifest()
+        self._codex_installing = True
         self.codex_download_btn.setEnabled(False)
-        self.codex_download_btn.setText("  Đang cài đặt...")
-        self.codex_status_label.setText("Đang cài đặt môi trường và Codex...")
+        self.codex_download_btn.setText("  Đang tải...")
+        self.codex_verify_btn.setEnabled(False)
+        self.codex_status_icon.setText("🟡")
+        self.codex_status_label.setText("Đang tải và cài đặt Codex CLI...")
         self.codex_status_label.setStyleSheet("font-size: 14px; font-weight: 600; color: #3B82F6;")
-        self.codex_hint.setText("Việc này có thể mất vài phút. Vui lòng chờ và cấp quyền Admin/Sudo nếu được yêu cầu.")
+        self.codex_hint.setText("Đang xử lý. Bạn có thể theo dõi tiến trình bên dưới.")
+        self._set_progress(True, 5, "Khởi tạo cài đặt Codex...")
+        self._show_missing_runtime_actions(runtime_missing)
 
-        # Chạy logic cài đặt trong Bg Worker (Thread) để không treo UI
-        import threading
-        def install_worker():
-            try:
-                release_manifest = self.env_manager.fetch_codex_release_manifest()
-                install_policy = release_manifest.get("install_policy", {})
-                auto_install_runtime = bool(install_policy.get("auto_install_runtime", True))
+        self._codex_install_worker = CodexInstallWorker(self.env_manager, release_manifest, self)
+        self._codex_install_worker.progress.connect(self._on_codex_install_progress)
+        self._codex_install_worker.finished.connect(self._on_codex_install_finished)
+        self._codex_install_worker.start()
 
-                env_status = self.env_manager.check_prerequisites()
-                missing_runtime = [k for k in ("python", "node", "npm") if env_status.get(k) == "MISSING"]
-                
-                # 1. Cài đặt Python/Node nếu thiếu
-                if missing_runtime:
-                    if not auto_install_runtime:
-                        raise Exception(
-                            "Thiếu runtime hệ thống và server đang tắt auto-install. "
-                            "Vui lòng cài thủ công rồi thử lại."
-                        )
-                    installed = self.env_manager.install_missing_env(missing_runtime, install_policy)
-                    if not installed:
-                        raise Exception("Không thể cài đặt runtime tự động.")
+    def _on_codex_install_progress(self, percent: int, message: str):
+        self._set_progress(True, percent, message)
 
-                    # Recheck để đảm bảo cài đặt thực sự thành công.
-                    recheck = self.env_manager.check_prerequisites()
-                    still_missing = [k for k in ("python", "node", "npm") if recheck.get(k) == "MISSING"]
-                    if still_missing:
-                        raise Exception(f"Thiếu runtime sau khi cài: {', '.join(still_missing)}")
-                
-                # 2. Tải và cài đặt Codex từ release manifest (server first, local fallback)
-                platform_key = self.env_manager.get_platform_key()
-                platform_data = release_manifest.get("platforms", {}).get(platform_key, {})
-                dl_url = (platform_data.get("url") or "").strip()
-                if not dl_url:
-                    raise Exception(f"HĐH không được hỗ trợ Codex ({platform_key}).")
-
-                success = self.env_manager.download_and_install_codex(dl_url)
-                if not success:
-                    raise Exception("Không tải/cài được Codex CLI.")
-
-                # Chạy UI update từ Main Thread
-                from PyQt5.QtCore import QTimer
-                QTimer.singleShot(0, self._on_download_complete)
-            except Exception as e:
-                logger.error(f"Install worker error: {e}")
-                from PyQt5.QtCore import QTimer
-                QTimer.singleShot(0, lambda: self._on_download_failed(f"Lỗi: {str(e)[:80]}"))
-
-        threading.Thread(target=install_worker, daemon=True).start()
+    def _on_codex_install_finished(self, result: dict):
+        self._codex_installing = False
+        self._codex_install_worker = None
+        if result.get("success"):
+            self._on_download_complete()
+        else:
+            self._on_download_failed(result.get("message", "Không tải/cài được Codex CLI."))
 
     def _on_download_complete(self):
         """Callback sau khi tải Codex xong."""
+        self._set_progress(True, 100, "Cài đặt Codex hoàn tất.")
         self.codex_download_btn.setEnabled(True)
         self.codex_download_btn.setText("  Tải bộ não AI")
         self.codex_download_btn.setVisible(False)
+        self.codex_verify_btn.setEnabled(True)
         self.codex_verify_btn.setVisible(True)
         self.codex_status_icon.setText("🟡")
         self.codex_status_label.setText("Đã cài đặt · Chưa xác thực")
@@ -516,8 +851,10 @@ class AuthPage(QWidget):
 
     def _on_download_failed(self, msg: str):
         """Reset UI đúng trạng thái khi tải/cài Codex lỗi."""
+        self._set_progress(True, 100, "Tiến trình dừng do lỗi.")
         self.codex_download_btn.setEnabled(True)
         self.codex_download_btn.setText("  Tải bộ não AI")
+        self.codex_verify_btn.setEnabled(True)
         self.codex_status_icon.setText("🔴")
         self.codex_status_label.setText(msg)
         self.codex_status_label.setStyleSheet("font-size: 14px; font-weight: 600; color: #EF4444;")
@@ -528,6 +865,8 @@ class AuthPage(QWidget):
         except Exception:
             env_status = {}
 
+        runtime_missing = [k for k in ("python", "node", "npm") if env_status.get(k) == "MISSING"]
+        self._show_missing_runtime_actions(runtime_missing)
         codex_ready = env_status.get("codex_ready", env_status.get("codex") == "OK")
         self.codex_download_btn.setVisible(not codex_ready)
         self.codex_verify_btn.setVisible(codex_ready)
@@ -596,6 +935,8 @@ class AuthPage(QWidget):
             env_status = self.env_manager.check_prerequisites() if self.env_manager else {}
         except Exception:
             env_status = {}
+        runtime_missing = [k for k in ("python", "node", "npm") if env_status.get(k) == "MISSING"]
+        self._show_missing_runtime_actions(runtime_missing)
         codex_ready = env_status.get("codex_ready", env_status.get("codex") == "OK")
         self.codex_verify_btn.setVisible(codex_ready)
         self.codex_download_btn.setVisible(not codex_ready)
@@ -645,37 +986,100 @@ class AuthPage(QWidget):
         import platform, subprocess
         sys_name = platform.system()
 
+        reason_map = {
+            "accessibility": (
+                "Quyền Accessibility cho phép AI điều khiển bàn phím/chuột và thao tác ứng dụng khi được yêu cầu."
+            ),
+            "screenshot": (
+                "Quyền chụp màn hình cho phép AI đọc nội dung màn hình để phân tích và hỗ trợ xử lý lỗi."
+            ),
+            "camera": (
+                "Quyền Camera cho phép AI truy cập webcam khi bạn bật các tác vụ cần hình ảnh trực tiếp."
+            ),
+        }
+        reason = reason_map.get(perm_type, "Ứng dụng cần quyền hệ thống để thực hiện tính năng này.")
+        approved = self._confirm_privileged_action(
+            "Yêu cầu quyền hệ thống",
+            f"{reason}\n\nNhấn OK để mở màn hình cấp quyền, hoặc Cancel để huỷ.",
+        )
+        if not approved:
+            widget_map = {
+                "accessibility": self.perm_accessibility,
+                "screenshot": self.perm_screenshot,
+                "camera": self.perm_camera,
+            }
+            w = widget_map.get(perm_type)
+            if w:
+                w.blockSignals(True)
+                w.setChecked(False)
+                w.blockSignals(False)
+            return
+
+        def _open_target(cmd):
+            try:
+                subprocess.Popen(cmd, shell=isinstance(cmd, str))
+                return True
+            except Exception as e:
+                logger.error(f"Open permission settings failed ({perm_type}): {e}")
+                return False
+
         if sys_name == "Darwin":  # macOS
             if perm_type == "accessibility":
                 # Mở Security & Privacy -> Accessibility
-                subprocess.Popen([
+                ok_open = _open_target([
                     "open", "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"
                 ])
             elif perm_type == "screenshot":
                 # Mở Security & Privacy -> Screen Recording
-                subprocess.Popen([
+                ok_open = _open_target([
                     "open", "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture"
                 ])
             elif perm_type == "camera":
                 # Mở Security & Privacy -> Camera
-                subprocess.Popen([
+                ok_open = _open_target([
                     "open", "x-apple.systempreferences:com.apple.preference.security?Privacy_Camera"
                 ])
+            else:
+                ok_open = False
+
+            if ok_open:
+                QMessageBox.information(
+                    self,
+                    "Mở màn hình cấp quyền",
+                    "Đã mở màn hình quyền hệ thống. Hãy bật quyền cho OmniMind/Codex rồi quay lại ứng dụng.",
+                )
+            else:
+                QMessageBox.warning(
+                    self,
+                    "Không thể mở màn hình quyền",
+                    "Không thể mở màn hình cấp quyền tự động. Vui lòng mở System Settings thủ công.",
+                )
 
         elif sys_name == "Windows":
             if perm_type == "accessibility":
-                # Windows: mở Ease of Access
-                subprocess.Popen(["start", "ms-settings:easeofaccess-keyboard"], shell=True)
+                # Windows: mở màn hình Accessibility
+                ok_open = _open_target("start ms-settings:easeofaccess-keyboard")
             elif perm_type == "screenshot":
-                from PyQt5.QtWidgets import QMessageBox
-                QMessageBox.information(
-                    self, "Screen Capture",
-                    "Trên Windows, quyền chụp màn hình đã được cấp mặc định.",
-                )
+                # Windows không có trang riêng cho screenshot tương tự macOS; mở Privacy tổng quát.
+                ok_open = _open_target("start ms-settings:privacy")
             elif perm_type == "camera":
-                subprocess.Popen(["start", "ms-settings:privacy-webcam"], shell=True)
+                ok_open = _open_target("start ms-settings:privacy-webcam")
+            else:
+                ok_open = False
+
+            if ok_open:
+                QMessageBox.information(
+                    self,
+                    "Mở màn hình cấp quyền",
+                    "Đã mở phần Settings tương ứng. Hãy cấp quyền rồi quay lại ứng dụng.",
+                )
+            else:
+                QMessageBox.warning(
+                    self,
+                    "Không thể mở Settings",
+                    "Không thể mở màn hình quyền tự động. Vui lòng mở Settings thủ công.",
+                )
         else:
-            from PyQt5.QtWidgets import QMessageBox
             QMessageBox.information(
                 self, "Quyền Hệ Thống",
                 f"Hệ điều hành {sys_name} chưa được hỗ trợ cấp quyền tự động.\n"
@@ -719,33 +1123,70 @@ class AuthPage(QWidget):
                 try:
                     plist_path.write_text(plist_content)
                     import subprocess
-                    subprocess.run(["launchctl", "load", str(plist_path)], capture_output=True)
+                    # Unload trước để tránh duplicate entry khi update.
+                    subprocess.run(["launchctl", "unload", str(plist_path)], capture_output=True)
+                    result = subprocess.run(["launchctl", "load", str(plist_path)], capture_output=True, text=True)
+                    if result.returncode != 0:
+                        logger.error(f"launchctl load failed: {result.stderr.strip()}")
+                        QMessageBox.warning(
+                            self,
+                            "Auto-start macOS",
+                            "Không bật được tự khởi động trên macOS. Vui lòng kiểm tra quyền LaunchAgents.",
+                        )
+                        return
                     logger.info("Auto-start enabled for macOS via LaunchAgent.")
                 except Exception as e:
                     logger.error(f"Failed to enable auto-start on macOS: {e}")
+                    QMessageBox.warning(
+                        self,
+                        "Auto-start macOS",
+                        f"Lỗi bật tự khởi động: {str(e)[:120]}",
+                    )
             else:
                 if plist_path.exists():
                     try:
                         import subprocess
-                        subprocess.run(["launchctl", "unload", str(plist_path)], capture_output=True)
+                        result = subprocess.run(["launchctl", "unload", str(plist_path)], capture_output=True, text=True)
+                        if result.returncode != 0:
+                            logger.warning(f"launchctl unload warning: {result.stderr.strip()}")
                         plist_path.unlink()
                         logger.info("Auto-start disabled for macOS.")
                     except Exception as e:
                         logger.error(f"Failed to disable auto-start on macOS: {e}")
+                        QMessageBox.warning(
+                            self,
+                            "Auto-start macOS",
+                            f"Lỗi tắt tự khởi động: {str(e)[:120]}",
+                        )
                         
         elif sys_name == "Windows":
             # Ghi registry để auto start trên Windows
             import winreg, sys
+            from pathlib import Path
             key_path = r"Software\Microsoft\Windows\CurrentVersion\Run"
             try:
                 key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, key_path, 0, winreg.KEY_SET_VALUE)
                 if is_enabled:
-                    # Truyền sys.argv[0] hoặc file exe nếu đã compiled
-                    winreg.SetValueEx(key, "OmniMind", 0, winreg.REG_SZ, f'"{sys.argv[0]}"')
+                    # Nếu chạy binary đóng gói: dùng chính executable.
+                    # Nếu chạy source: lưu command đầy đủ gồm Python + main.py.
+                    if getattr(sys, "frozen", False):
+                        cmd = f'"{sys.executable}"'
+                    else:
+                        main_py = Path(__file__).resolve().parents[2] / "main.py"
+                        cmd = f'"{sys.executable}" "{main_py}"'
+                    winreg.SetValueEx(key, "OmniMind", 0, winreg.REG_SZ, cmd)
                     logger.info("Auto-start enabled for Windows via Registry.")
                 else:
-                    winreg.DeleteValue(key, "OmniMind")
+                    try:
+                        winreg.DeleteValue(key, "OmniMind")
+                    except FileNotFoundError:
+                        pass
                     logger.info("Auto-start disabled for Windows.")
                 winreg.CloseKey(key)
             except Exception as e:
                 logger.error(f"Failed to toggle auto-start on Windows: {e}")
+                QMessageBox.warning(
+                    self,
+                    "Auto-start Windows",
+                    f"Lỗi cập nhật Registry: {str(e)[:120]}",
+                )

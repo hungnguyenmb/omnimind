@@ -7,6 +7,7 @@ import urllib.request
 import zipfile
 import tarfile
 from pathlib import Path
+from typing import Callable, Optional
 from engine.config_manager import ConfigManager
 
 logger = logging.getLogger(__name__)
@@ -48,11 +49,36 @@ class EnvironmentManager:
     def __init__(self):
         self.os_name = platform.system()
         self.app_data_dir = self._get_app_data_dir()
+        self.codex_home = Path(ConfigManager.get_codex_home())
+        self.codex_home.mkdir(parents=True, exist_ok=True)
+        # Chuẩn hóa CODEX_HOME xuyên suốt runtime.
+        os.environ["CODEX_HOME"] = str(self.codex_home)
+        # Persist để lần chạy sau không lệch path giữa các module.
+        ConfigManager.set_codex_home(str(self.codex_home))
         self.codex_bin_dir = self.app_data_dir / "bin"
         self.codex_bin_dir.mkdir(parents=True, exist_ok=True)
         
         # Đưa thư mục bin cục bộ vào PATH tạm thời cho phiên chạy
         os.environ["PATH"] = f"{str(self.codex_bin_dir)}{os.pathsep}{os.environ.get('PATH', '')}"
+
+    def _codex_env(self) -> dict:
+        env = os.environ.copy()
+        env["CODEX_HOME"] = str(self.codex_home)
+        sandbox_mode = ConfigManager.get_sandbox_mode()
+        # Dùng biến env để các lệnh Codex/bot engine downstream có thể đọc cùng 1 cấu hình sandbox.
+        env["OMNIMIND_SANDBOX_MODE"] = sandbox_mode
+        env["CODEX_SANDBOX_MODE"] = sandbox_mode
+        return env
+
+    @staticmethod
+    def _emit_progress(progress_callback: Optional[Callable[[int, str], None]], percent: int, message: str):
+        if not progress_callback:
+            return
+        try:
+            bounded = max(0, min(100, int(percent)))
+            progress_callback(bounded, message)
+        except Exception:
+            pass
 
     def _resolve_codex_cmd(self) -> str:
         """Ưu tiên codex đã cài local trong app, fallback system PATH."""
@@ -87,6 +113,48 @@ class EnvironmentManager:
             return cfg_val
 
         return DEFAULT_API_BASE_URL
+
+    def get_runtime_installer_status(self) -> dict:
+        """
+        Kiểm tra công cụ cài đặt runtime tự động theo HĐH.
+        - macOS: Homebrew
+        - Windows: winget
+        """
+        if self.os_name == "Darwin":
+            ready = shutil.which("brew") is not None
+            return {
+                "tool": "brew",
+                "display_name": "Homebrew",
+                "ready": ready,
+                "message": (
+                    "Homebrew đã sẵn sàng."
+                    if ready
+                    else "Thiếu Homebrew. Cài Homebrew trước khi cài Python/Node tự động."
+                ),
+                "manual_hint": '/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"',
+            }
+
+        if self.os_name == "Windows":
+            ready = shutil.which("winget") is not None
+            return {
+                "tool": "winget",
+                "display_name": "WinGet",
+                "ready": ready,
+                "message": (
+                    "WinGet đã sẵn sàng."
+                    if ready
+                    else "Thiếu WinGet (App Installer). Cài App Installer từ Microsoft Store trước."
+                ),
+                "manual_hint": "Cài App Installer từ Microsoft Store, sau đó mở lại ứng dụng.",
+            }
+
+        return {
+            "tool": "unsupported",
+            "display_name": "Unsupported",
+            "ready": False,
+            "message": f"HĐH {self.os_name} chưa hỗ trợ auto-install runtime.",
+            "manual_hint": "Vui lòng cài Python/Node/npm thủ công.",
+        }
 
     def fetch_codex_release_manifest(self) -> dict:
         """
@@ -163,22 +231,34 @@ class EnvironmentManager:
         status["is_ready"] = codex_ready
         return status
 
-    def install_missing_env(self, missing_list: list, install_policy: dict | None = None) -> bool:
+    def install_missing_env(
+        self,
+        missing_list: list,
+        install_policy: dict | None = None,
+        progress_callback: Optional[Callable[[int, str], None]] = None,
+    ) -> bool:
         """
         Cài đặt tự động các môi trường bị thiếu (Yêu cầu Quyền Admin/Sudo).
         """
         logger.info(f"Attempting to install missing environment: {missing_list}")
+        self._emit_progress(progress_callback, 5, "Đang chuẩn bị cài đặt môi trường...")
         policy = install_policy or {}
         
         if self.os_name == "Windows":
-            return self._install_env_windows(missing_list, policy.get("windows", {}))
+            return self._install_env_windows(missing_list, policy.get("windows", {}), progress_callback)
         elif self.os_name == "Darwin":
-            return self._install_env_macos(missing_list, policy.get("darwin", {}))
+            return self._install_env_macos(missing_list, policy.get("darwin", {}), progress_callback)
         else:
             logger.error("Auto-install not supported on this OS.")
+            self._emit_progress(progress_callback, 100, "Hệ điều hành chưa hỗ trợ cài đặt tự động.")
             return False
 
-    def _install_env_windows(self, missing: list, policy: dict | None = None) -> bool:
+    def _install_env_windows(
+        self,
+        missing: list,
+        policy: dict | None = None,
+        progress_callback: Optional[Callable[[int, str], None]] = None,
+    ) -> bool:
         """Sử dụng WinGet / PowerShell để cài âm thầm trên Windows."""
         policy = policy or {}
         try:
@@ -191,21 +271,31 @@ class EnvironmentManager:
             if "node" in missing or "npm" in missing:
                 script.append(f"winget install -e --id {node_pkg} --silent")
                 
-            if not script: return True
+            if not script:
+                self._emit_progress(progress_callback, 100, "Môi trường đã đầy đủ.")
+                return True
             
             ps_command = " ; ".join(script)
             logger.info(f"Running Windows installer: {ps_command}")
+            self._emit_progress(progress_callback, 20, "Đang yêu cầu quyền quản trị Windows (UAC)...")
             # Dùng powershell Start-Process để trigger UAC Admin
             subprocess.run([
                 "powershell", "-Command", 
                 f"Start-Process powershell -ArgumentList '-NoProfile -ExecutionPolicy Bypass -Command \"{ps_command}\"' -Verb RunAs -Wait"
             ], check=True)
+            self._emit_progress(progress_callback, 90, "Đang xác minh môi trường sau cài đặt...")
             return True
         except Exception as e:
             logger.error(f"Windows env install failed: {e}")
+            self._emit_progress(progress_callback, 100, f"Cài đặt thất bại: {str(e)[:80]}")
             return False
 
-    def _install_env_macos(self, missing: list, policy: dict | None = None) -> bool:
+    def _install_env_macos(
+        self,
+        missing: list,
+        policy: dict | None = None,
+        progress_callback: Optional[Callable[[int, str], None]] = None,
+    ) -> bool:
         """Sử dụng Homebrew trên macOS. Yêu cầu nhập pass Sudo qua GUI (tương lai)."""
         policy = policy or {}
         try:
@@ -213,6 +303,7 @@ class EnvironmentManager:
             if not shutil.which("brew"):
                 logger.error("Homebrew is missing. Cannot auto-install on macOS.")
                 # TODO: Mở popup hướng dẫn cài Brew
+                self._emit_progress(progress_callback, 100, "Thiếu Homebrew. Vui lòng cài Homebrew trước.")
                 return False
                 
             script = []
@@ -223,18 +314,27 @@ class EnvironmentManager:
             if "node" in missing or "npm" in missing:
                 script.append(f"brew install {node_formula}")
                 
-            if not script: return True
+            if not script:
+                self._emit_progress(progress_callback, 100, "Môi trường đã đầy đủ.")
+                return True
             
             sh_command = " && ".join(script)
             logger.info(f"Running macOS installer: {sh_command}")
+            self._emit_progress(progress_callback, 20, "Đang chạy Homebrew để cài môi trường...")
             # Note: Brew không chạy dưới root, nên chạy lệnh thường. 
             subprocess.run(sh_command, shell=True, check=True)
+            self._emit_progress(progress_callback, 90, "Đang xác minh môi trường sau cài đặt...")
             return True
         except subprocess.CalledProcessError as e:
             logger.error(f"macOS env install failed: {e}")
+            self._emit_progress(progress_callback, 100, f"Cài đặt thất bại: {str(e)[:80]}")
             return False
 
-    def download_and_install_codex(self, download_url: str) -> bool:
+    def download_and_install_codex(
+        self,
+        download_url: str,
+        progress_callback: Optional[Callable[[int, str], None]] = None,
+    ) -> bool:
         """
         Tải binary Codex CLI từ Server, giải nén vào self.codex_bin_dir
         """
@@ -244,10 +344,25 @@ class EnvironmentManager:
         try:
             # Tải file
             req = urllib.request.Request(download_url, headers={'User-Agent': 'OmniMind-App'})
+            self._emit_progress(progress_callback, 5, "Bắt đầu tải Codex CLI...")
             with urllib.request.urlopen(req) as response, open(archive_path, 'wb') as out_file:
-                shutil.copyfileobj(response, out_file)
+                total_size = int(response.headers.get("Content-Length", "0") or "0")
+                downloaded = 0
+                chunk_size = 1024 * 256
+                while True:
+                    chunk = response.read(chunk_size)
+                    if not chunk:
+                        break
+                    out_file.write(chunk)
+                    downloaded += len(chunk)
+                    if total_size > 0:
+                        pct = 5 + int((downloaded / total_size) * 65)
+                    else:
+                        pct = min(70, 5 + int(downloaded / (1024 * 1024)))
+                    self._emit_progress(progress_callback, pct, "Đang tải Codex CLI...")
             
             logger.info("Extracting Codex CLI...")
+            self._emit_progress(progress_callback, 75, "Đang giải nén Codex CLI...")
             # Giải nén
             extracted = False
             if zipfile.is_zipfile(archive_path):
@@ -264,23 +379,27 @@ class EnvironmentManager:
                     
             # Cấp quyền thực thi (chmod +x) trên Mac/Linux
             if self.os_name != "Windows":
+                self._emit_progress(progress_callback, 88, "Đang cấp quyền thực thi Codex...")
                 for root, _, files in os.walk(self.codex_bin_dir):
                     for file in files:
                         os.chmod(os.path.join(root, file), 0o755)
 
             # Verify binary tồn tại sau khi giải nén.
+            self._emit_progress(progress_callback, 95, "Đang kiểm tra binary Codex...")
             if not shutil.which("codex", path=str(self.codex_bin_dir)) and not shutil.which("codex"):
                 raise RuntimeError("Không tìm thấy binary codex sau khi cài đặt.")
 
             # Dọn dẹp
             os.remove(archive_path)
             logger.info("Codex CLI installed successfully.")
+            self._emit_progress(progress_callback, 100, "Cài đặt Codex hoàn tất.")
             return True
             
         except Exception as e:
             logger.error(f"Download/Install Codex failed: {e}")
             if archive_path.exists():
                 os.remove(archive_path)
+            self._emit_progress(progress_callback, 100, f"Lỗi cài đặt Codex: {str(e)[:80]}")
             return False
 
     def verify_codex_auth(self) -> dict:
@@ -292,7 +411,7 @@ class EnvironmentManager:
         
         try:
             # 1. Kiểm tra file config trước (cách tốt nhất để tránh hang)
-            codex_dir = Path.home() / ".codex"
+            codex_dir = self.codex_home
             auth_file = codex_dir / "auth.json"
             
             if auth_file.exists():
@@ -317,7 +436,14 @@ class EnvironmentManager:
             codex_cmd = self._resolve_codex_cmd()
             logger.info(f"Fallback: Checking Codex auth status using: {codex_cmd}")
             
-            subprocess.run([codex_cmd, "--version"], capture_output=True, text=True, timeout=3, stdin=subprocess.DEVNULL)
+            subprocess.run(
+                [codex_cmd, "--version"],
+                capture_output=True,
+                text=True,
+                timeout=3,
+                stdin=subprocess.DEVNULL,
+                env=self._codex_env(),
+            )
             
             # Sử dụng timeout ngắn để tránh treo hoàn toàn
             result = subprocess.run(
@@ -325,7 +451,8 @@ class EnvironmentManager:
                 capture_output=True, 
                 text=True, 
                 timeout=5, 
-                stdin=subprocess.DEVNULL
+                stdin=subprocess.DEVNULL,
+                env=self._codex_env(),
             )
             
             output = result.stdout.strip()
@@ -360,6 +487,7 @@ class EnvironmentManager:
                 text=True,
                 timeout=180,
                 stdin=subprocess.DEVNULL,
+                env=self._codex_env(),
             )
 
             output = (result.stdout or "").strip()
@@ -391,7 +519,13 @@ class EnvironmentManager:
         """
         try:
             codex_cmd = self._resolve_codex_cmd()
-            result = subprocess.run([codex_cmd, "logout"], capture_output=True, text=True, timeout=10)
+            result = subprocess.run(
+                [codex_cmd, "logout"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                env=self._codex_env(),
+            )
             
             if result.returncode == 0:
                 return {"success": True, "message": "Đã đăng xuất thành công."}
