@@ -1,0 +1,385 @@
+/* ═══════════════════════════════════════════════
+   OmniMind - Modern Light Theme Stylesheet
+   Tông sáng, chuyên nghiệp, bo tròn tinh tế.
+   ═══════════════════════════════════════════════ */
+
+/* ── Global ── */
+QMainWindow, QDialog {
+    background-color: #F8FAFC;
+}
+
+QLabel {
+    color: #334155;
+    font-size: 14px;
+}
+
+/* ── Sidebar ── */
+#Sidebar {
+    background-color: #FFFFFF;
+    border-right: 1px solid #E2E8F0;
+}
+
+#LogoLabel {
+    font-size: 28px;
+    font-weight: 800;
+    color: #0F172A;
+    letter-spacing: 0.5px;
+    padding-bottom: 0px;
+}
+
+#LogoTagline {
+    font-size: 13px;
+    font-weight: 500;
+    color: #94A3B8;
+    letter-spacing: 1px;
+}
+
+#NavButton {
+    background-color: transparent;
+    color: #64748B;
+    border: none;
+    border-radius: 12px;
+    padding: 13px 16px;
+    font-size: 14px;
+    font-weight: 600;
+    text-align: left;
+}
+
+#NavButton:hover {
+    background-color: #F1F5F9;
+    color: #334155;
+}
+
+#NavButton:checked {
+    background-color: #EFF6FF;
+    color: #2563EB;
+}
+
+#VersionLabel {
+    color: #CBD5E1;
+    font-size: 12px;
+    font-weight: 500;
+    padding: 8px 0;
+}
+
+/* ── Content Area ── */
+#ContentArea {
+    background-color: #F8FAFC;
+}
+
+#PageTitle {
+    font-size: 30px;
+    font-weight: 800;
+    color: #0F172A;
+    letter-spacing: -0.4px;
+}
+
+#PageDesc {
+    font-size: 14px;
+    color: #64748B;
+    line-height: 1.5;
+}
+
+/* ── Cards ── */
+#Card, #SkillCard {
+    background-color: #FFFFFF;
+    border-radius: 14px;
+    border: 1px solid #E2E8F0;
+}
+
+#SkillCard:hover {
+    border: 1px solid #93C5FD;
+}
+
+/* ── Buttons ── */
+#PrimaryBtn {
+    background-color: #2563EB;
+    color: #FFFFFF;
+    border: none;
+    border-radius: 10px;
+    padding: 10px 24px;
+    font-size: 14px;
+    font-weight: 600;
+}
+
+#PrimaryBtn:hover {
+    background-color: #1D4ED8;
+}
+
+#PrimaryBtn:pressed {
+    background-color: #1E40AF;
+}
+
+#SecondaryBtn {
+    background-color: #EFF6FF;
+    color: #2563EB;
+    border: 1px solid #BFDBFE;
+    border-radius: 10px;
+    padding: 10px 20px;
+    font-size: 14px;
+    font-weight: 600;
+}
+
+#SecondaryBtn:hover {
+    background-color: #DBEAFE;
+}
+
+#InstalledBtn {
+    background-color: #F0FDF4;
+    color: #16A34A;
+    border: 1px solid #BBF7D0;
+    border-radius: 10px;
+    padding: 10px 20px;
+    font-size: 14px;
+    font-weight: 600;
+}
+
+#IconBtn {
+    background: transparent;
+    border: none;
+    border-radius: 8px;
+    padding: 6px;
+    min-width: 32px;
+    max-width: 32px;
+    min-height: 32px;
+    max-height: 32px;
+}
+
+#IconBtn:hover {
+    background-color: #F1F5F9;
+}
+
+/* ── Form Elements ── */
+#FormInput, QTextEdit#FormInput {
+    background-color: #F8FAFC;
+    border: 1.5px solid #E2E8F0;
+    border-radius: 10px;
+    padding: 10px 16px;
+    font-size: 14px;
+    color: #0F172A;
+    selection-background-color: #BFDBFE;
+}
+
+#FormInput:focus, QTextEdit#FormInput:focus {
+    border: 1.5px solid #3B82F6;
+    background-color: #FFFFFF;
+}
+
+#FormCombo {
+    background-color: #F8FAFC;
+    border: 1.5px solid #E2E8F0;
+    border-radius: 10px;
+    padding: 10px 16px;
+    font-size: 14px;
+    color: #0F172A;
+}
+
+#FormCombo:focus {
+    border: 1.5px solid #3B82F6;
+}
+
+#FormCombo::drop-down {
+    border: none;
+    width: 30px;
+}
+
+#FormCombo QAbstractItemView {
+    background-color: #FFFFFF;
+    border: 1px solid #E2E8F0;
+    border-radius: 8px;
+    padding: 4px;
+    selection-background-color: #EFF6FF;
+    selection-color: #2563EB;
+}
+
+/* ── Table ── */
+#DataTable {
+    background-color: #FFFFFF;
+    border: none;
+    gridline-color: #F1F5F9;
+    font-size: 14px;
+    selection-background-color: #EFF6FF;
+    selection-color: #0F172A;
+    outline: none;
+}
+
+#DataTable::item {
+    padding: 4px 10px;
+    color: #334155;
+    border: none;
+    outline: none;
+}
+
+#DataTable::item:selected {
+    background-color: #EFF6FF;
+    border: none;
+    outline: none;
+}
+
+#DataTable::item:alternate {
+    background-color: #FAFBFC;
+}
+
+QHeaderView::section {
+    background-color: #F8FAFC;
+    color: #64748B;
+    font-size: 12px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    padding: 12px 14px;
+    border: none;
+    border-bottom: 2px solid #E2E8F0;
+}
+
+/* ── License Screen ── */
+#LicenseDialog {
+    background-color: #FFFFFF;
+}
+
+#LicenseHeader {
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #2563EB, stop:1 #7C3AED);
+}
+
+#LicenseTitle {
+    font-size: 32px;
+    font-weight: 800;
+    color: #FFFFFF;
+    background: transparent;
+}
+
+#LicenseSubtitle {
+    font-size: 14px;
+    font-weight: 500;
+    color: rgba(255, 255, 255, 0.8);
+    background: transparent;
+    letter-spacing: 2px;
+}
+
+#LicenseFormCard {
+    background-color: #FFFFFF;
+}
+
+#LicensePrompt {
+    font-size: 15px;
+    font-weight: 600;
+    color: #334155;
+}
+
+#LicenseInput {
+    background-color: #F8FAFC;
+    border: 2px solid #E2E8F0;
+    border-radius: 12px;
+    padding: 14px 20px;
+    font-size: 18px;
+    font-weight: 600;
+    color: #0F172A;
+    letter-spacing: 2px;
+}
+
+#LicenseInput:focus {
+    border: 2px solid #3B82F6;
+    background-color: #FFFFFF;
+}
+
+#LicenseActivateBtn {
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #2563EB, stop:1 #7C3AED);
+    color: #FFFFFF;
+    border: none;
+    border-radius: 12px;
+    padding: 14px 24px;
+    font-size: 16px;
+    font-weight: 700;
+}
+
+#LicenseActivateBtn:hover {
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #1D4ED8, stop:1 #6D28D9);
+}
+
+#LicenseGetKeyBtn {
+    color: #3B82F6;
+    font-size: 13px;
+    font-weight: 500;
+    border: none;
+    background: transparent;
+    padding: 8px;
+}
+
+#LicenseGetKeyBtn:hover {
+    color: #1D4ED8;
+}
+
+/* ── Skill Tabs ── */
+#SkillTabs::pane {
+    border: 1px solid #E2E8F0;
+    border-radius: 12px;
+    background-color: #FFFFFF;
+}
+
+#SkillTabs::tab-bar {
+    left: 12px;
+}
+
+QTabBar::tab {
+    background-color: transparent;
+    color: #64748B;
+    font-size: 14px;
+    font-weight: 600;
+    padding: 12px 24px;
+    border: none;
+    border-bottom: 3px solid transparent;
+    margin-right: 4px;
+    min-width: 120px;
+}
+
+QTabBar::tab:selected {
+    color: #2563EB;
+    border-bottom: 3px solid #2563EB;
+}
+
+QTabBar::tab:hover:!selected {
+    color: #334155;
+    border-bottom: 3px solid #CBD5E1;
+}
+
+/* ── Changelog ── */
+#ChangelogText {
+    font-size: 14px;
+    color: #475569;
+    line-height: 1.6;
+    padding: 8px 0;
+}
+
+/* ── ScrollArea ── */
+#ScrollArea {
+    border: none;
+    background-color: transparent;
+}
+
+#ScrollArea > QWidget > QWidget {
+    background-color: transparent;
+}
+
+QScrollArea > QWidget {
+    background-color: transparent;
+}
+
+QScrollBar:vertical {
+    background: transparent;
+    width: 8px;
+    margin: 0;
+}
+
+QScrollBar::handle:vertical {
+    background: #CBD5E1;
+    border-radius: 4px;
+    min-height: 30px;
+}
+
+QScrollBar::handle:vertical:hover {
+    background: #94A3B8;
+}
+
+QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+    height: 0;
+}
