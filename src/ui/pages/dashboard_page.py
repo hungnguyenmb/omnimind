@@ -22,6 +22,8 @@ from PyQt5.QtWidgets import (
 )
 
 from engine.dashboard_manager import DashboardManager
+from engine.config_manager import ConfigManager
+from engine.skill_manager import SkillManager
 from ui.icons import Icons
 
 
@@ -47,6 +49,54 @@ class UpdateInstallWorker(QThread):
         self.finished.emit(result)
 
 
+class UpdateCheckWorker(QThread):
+    finished = pyqtSignal(dict)
+
+    def __init__(self, dashboard_mgr, current_version: str, parent=None):
+        super().__init__(parent)
+        self.dashboard_mgr = dashboard_mgr
+        self.current_version = current_version
+
+    def run(self):
+        try:
+            result = self.dashboard_mgr.check_for_updates(self.current_version)
+        except Exception as e:
+            result = {"success": False, "message": f"Lỗi kiểm tra cập nhật: {str(e)[:160]}"}
+        self.finished.emit(result)
+
+
+class BotRuntimeActionWorker(QThread):
+    finished = pyqtSignal(dict)
+
+    def __init__(
+        self,
+        skill_manager: SkillManager,
+        skill_id: str,
+        action_id: str,
+        payload: dict | None = None,
+        auto_request_permissions: bool = False,
+        parent=None,
+    ):
+        super().__init__(parent)
+        self.skill_manager = skill_manager
+        self.skill_id = skill_id
+        self.action_id = action_id
+        self.payload = payload or {}
+        self.auto_request_permissions = auto_request_permissions
+
+    def run(self):
+        try:
+            result = self.skill_manager.execute_builtin_skill_action(
+                skill_id=self.skill_id,
+                action_id=self.action_id,
+                payload=self.payload,
+                auto_request_permissions=self.auto_request_permissions,
+            )
+        except Exception as e:
+            result = {"success": False, "code": "BOT_RUNTIME_EXCEPTION", "message": str(e)}
+        self.finished.emit(result)
+
+
 def _detect_os():
     """Phát hiện hệ điều hành, trả về (name, version, icon_emoji)."""
     sys_name = platform.system()
@@ -65,10 +115,14 @@ class DashboardPage(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.dashboard_mgr = DashboardManager()
+        self.skill_mgr = SkillManager()
         self.current_version = self.dashboard_mgr.get_current_version()
         self.os_name, self.os_version, self.os_icon = _detect_os()
         self.os_arch = platform.machine()
         self._update_worker = None
+        self._check_worker = None
+        self._bot_action_worker = None
+        self._pending_bot_action = ""
         self._latest_update_info = {}
 
         # Widgets to update later
@@ -81,9 +135,16 @@ class DashboardPage(QWidget):
         self.update_btn = None
         self.update_progress = None
         self.update_progress_text = None
+        self.bot_val = None
+        self.bot_badge = None
+        self.bot_extra = None
+        self.bot_toggle_btn = None
+        self.bot_test_capture_btn = None
 
         self._setup_ui()
         self._load_dashboard_data()
+        self._load_bot_status()
+        self._start_update_check(silent=True)
 
     def _setup_ui(self):
         layout = QVBoxLayout(self)
@@ -114,17 +175,17 @@ class DashboardPage(QWidget):
         self.license_extra = self.license_card.findChild(QLabel, "ExtraLbl")
         cards_grid.addWidget(self.license_card, 0, 0)
 
-        cards_grid.addWidget(
-            self._create_status_card(
-                "Telegram Bot",
-                "Chờ khởi động",
-                '<span style="color: #94A3B8;">●</span> Offline',
-                "#3B82F6",
-                "Bot chưa chạy",
-            ),
-            0,
-            1,
+        self.bot_card = self._create_status_card(
+            "Telegram Bot",
+            "Chờ khởi động",
+            '<span style="color: #94A3B8;">●</span> Offline',
+            "#3B82F6",
+            "Bot chưa chạy",
         )
+        self.bot_val = self.bot_card.findChild(QLabel, "ValueLbl")
+        self.bot_badge = self.bot_card.findChild(QLabel, "BadgeLbl")
+        self.bot_extra = self.bot_card.findChild(QLabel, "ExtraLbl")
+        cards_grid.addWidget(self.bot_card, 0, 1)
 
         self.version_card = self._create_status_card(
             "Phiên Bản",
@@ -159,6 +220,7 @@ class DashboardPage(QWidget):
         self.bot_toggle_btn.setCursor(Qt.PointingHandCursor)
         self.bot_toggle_btn.setMinimumWidth(140)
         self.bot_toggle_btn.setMinimumHeight(42)
+        self.bot_toggle_btn.clicked.connect(self._toggle_bot)
         bot_header.addWidget(self.bot_toggle_btn)
 
         bot_layout.addLayout(bot_header)
@@ -170,6 +232,18 @@ class DashboardPage(QWidget):
         bot_desc.setObjectName("PageDesc")
         bot_desc.setWordWrap(True)
         bot_layout.addWidget(bot_desc)
+
+        bot_action_row = QHBoxLayout()
+        bot_action_row.addStretch()
+        self.bot_test_capture_btn = QPushButton("  Test Chụp Màn Hình")
+        self.bot_test_capture_btn.setObjectName("SecondaryBtn")
+        self.bot_test_capture_btn.setIcon(Icons.eye("#3B82F6", 16))
+        self.bot_test_capture_btn.setCursor(Qt.PointingHandCursor)
+        self.bot_test_capture_btn.setMinimumWidth(210)
+        self.bot_test_capture_btn.setMinimumHeight(38)
+        self.bot_test_capture_btn.clicked.connect(self._test_runtime_screen_capture)
+        bot_action_row.addWidget(self.bot_test_capture_btn)
+        bot_layout.addLayout(bot_action_row)
 
         layout.addWidget(bot_frame)
 
@@ -205,12 +279,7 @@ class DashboardPage(QWidget):
         update_header.addWidget(self.update_btn)
         update_layout.addLayout(update_header)
 
-        self.changelog_text = QLabel(
-            "• <b>v1.0.0</b> (01/03/2026): Phiên bản đầu tiên. Hỗ trợ Context Injection Engine, "
-            "Skill Marketplace, License Gatekeeper.\n"
-            "• Streaming Tư Duy AI trực tiếp qua Telegram.\n"
-            "• System Tray, Auto-start cùng hệ điều hành."
-        )
+        self.changelog_text = QLabel("Đang tải changelog mới nhất từ server...")
         self.changelog_text.setObjectName("ChangelogText")
         self.changelog_text.setWordWrap(True)
         self.changelog_text.setTextFormat(Qt.RichText)
@@ -280,6 +349,132 @@ class DashboardPage(QWidget):
         if self.version_val:
             self.version_val.setText(f"v{self.current_version}")
 
+    def _load_bot_status(self):
+        enabled = ConfigManager.get("bot_enabled", "False") == "True"
+        self._apply_bot_ui(enabled)
+
+    def _apply_bot_ui(self, enabled: bool):
+        if self.bot_val:
+            self.bot_val.setText("Đang hoạt động" if enabled else "Chờ khởi động")
+            self.bot_val.setStyleSheet(
+                "font-size: 22px; font-weight: 800; color: #10B981;"
+                if enabled
+                else "font-size: 22px; font-weight: 800; color: #3B82F6;"
+            )
+        if self.bot_badge:
+            self.bot_badge.setText(
+                '<span style="color: #10B981;">●</span> Online'
+                if enabled
+                else '<span style="color: #94A3B8;">●</span> Offline'
+            )
+        if self.bot_extra:
+            self.bot_extra.setText("Bot runtime sẵn sàng nhận action." if enabled else "Bot đang tắt.")
+        if self.bot_toggle_btn:
+            self.bot_toggle_btn.setText("  Tắt Bot" if enabled else "  Bật Bot")
+            self.bot_toggle_btn.setIcon(Icons.power("#FFFFFF" if not enabled else "#EF4444", 18))
+            self.bot_toggle_btn.setObjectName("SecondaryBtn" if enabled else "PrimaryBtn")
+            self.bot_toggle_btn.style().unpolish(self.bot_toggle_btn)
+            self.bot_toggle_btn.style().polish(self.bot_toggle_btn)
+
+    @staticmethod
+    def _extract_missing_permission_names(result: dict) -> str:
+        preflight = result.get("preflight", {}) or {}
+        missing = preflight.get("missing_permissions", []) or []
+        names = sorted({str(item.get("permission", "")).strip() for item in missing if item.get("permission")})
+        return ", ".join([n for n in names if n])
+
+    def _run_bot_action(
+        self,
+        op_name: str,
+        action_id: str,
+        payload: dict | None = None,
+        auto_request_permissions: bool = False,
+    ):
+        if self._bot_action_worker and self._bot_action_worker.isRunning():
+            return
+
+        self._pending_bot_action = op_name
+        self.bot_toggle_btn.setEnabled(False)
+        self.bot_test_capture_btn.setEnabled(False)
+
+        self._bot_action_worker = BotRuntimeActionWorker(
+            self.skill_mgr,
+            skill_id="system-bot",
+            action_id=action_id,
+            payload=payload or {},
+            auto_request_permissions=auto_request_permissions,
+            parent=self,
+        )
+        self._bot_action_worker.finished.connect(self._on_bot_action_finished)
+        self._bot_action_worker.start()
+
+    def _toggle_bot(self):
+        enabled = ConfigManager.get("bot_enabled", "False") == "True"
+        if enabled:
+            ConfigManager.set("bot_enabled", "False")
+            self._apply_bot_ui(False)
+            return
+
+        self.bot_toggle_btn.setText("  Đang bật...")
+        self._run_bot_action("toggle_on", "runtime_ping", payload={}, auto_request_permissions=False)
+
+    def _test_runtime_screen_capture(self):
+        enabled = ConfigManager.get("bot_enabled", "False") == "True"
+        if not enabled:
+            QMessageBox.information(self, "Bot chưa bật", "Hãy bật Bot trước khi test runtime action.")
+            return
+
+        self._run_bot_action(
+            "screen_capture_test",
+            "screen_capture",
+            payload={"subdir": "runtime_tests"},
+            auto_request_permissions=True,
+        )
+
+    def _on_bot_action_finished(self, result: dict):
+        self.bot_toggle_btn.setEnabled(True)
+        self.bot_test_capture_btn.setEnabled(True)
+        self._bot_action_worker = None
+
+        op = self._pending_bot_action
+        self._pending_bot_action = ""
+
+        if op == "toggle_on":
+            if result.get("success"):
+                ConfigManager.set("bot_enabled", "True")
+                self._apply_bot_ui(True)
+            else:
+                self._apply_bot_ui(False)
+                QMessageBox.warning(
+                    self,
+                    "Không thể bật Bot",
+                    result.get("message", "Không thể khởi tạo runtime bot."),
+                )
+            return
+
+        if op == "screen_capture_test":
+            if result.get("success"):
+                msg = result.get("message", "Chụp màn hình thành công.")
+                artifact = result.get("artifact_path", "")
+                if artifact:
+                    msg += f"\n\nFile: {artifact}"
+                QMessageBox.information(self, "Runtime Test", msg)
+                return
+
+            if result.get("code") == "PERMISSION_REQUIRED":
+                missing = self._extract_missing_permission_names(result)
+                QMessageBox.warning(
+                    self,
+                    "Thiếu quyền hệ thống",
+                    (
+                        "Runtime action chưa thể chạy do thiếu quyền.\n"
+                        f"Quyền còn thiếu: {missing or 'Không xác định'}"
+                    ),
+                )
+                return
+
+            QMessageBox.warning(self, "Runtime Test thất bại", result.get("message", "Không thể chạy action."))
+
     def _set_update_progress(self, visible: bool, value: int = 0, message: str = ""):
         self.update_progress.setVisible(visible)
         self.update_progress_text.setVisible(visible)
@@ -290,19 +485,39 @@ class DashboardPage(QWidget):
             self.update_progress.setValue(0)
             self.update_progress_text.setText("")
 
-    def _on_check_updates(self):
+    def _render_changelog(self, logs: list):
+        if logs:
+            log_html = ""
+            for log in logs:
+                type_tag = f"<b>[{log.get('change_type', 'feat').upper()}]</b>"
+                log_html += f"• {type_tag} {log.get('content')}<br>"
+            self.changelog_text.setText(log_html)
+            return
+        self.changelog_text.setText("Không có changelog mới từ server.")
+
+    def _start_update_check(self, silent: bool):
+        if self._check_worker and self._check_worker.isRunning():
+            return
         if self._update_worker and self._update_worker.isRunning():
             return
 
         self.check_btn.setEnabled(False)
         self.check_btn.setText("  Đang kiểm tra...")
-        result = self.dashboard_mgr.check_for_updates(self.current_version)
+        self._check_worker = UpdateCheckWorker(self.dashboard_mgr, self.current_version, self)
+        self._check_worker.finished.connect(lambda result, s=silent: self._on_update_check_finished(result, s))
+        self._check_worker.start()
+
+    def _on_update_check_finished(self, result: dict, silent: bool):
         self.check_btn.setEnabled(True)
         self.check_btn.setText("  Kiểm Tra")
+        self._check_worker = None
 
         if not result.get("success"):
-            QMessageBox.warning(self, "Lỗi", f"Không thể kiểm tra cập nhật: {result.get('message')}")
+            if not silent:
+                QMessageBox.warning(self, "Lỗi", f"Không thể kiểm tra cập nhật: {result.get('message')}")
             return
+
+        self._render_changelog(result.get("changelogs", []))
 
         if result.get("has_update"):
             new_v = result.get("latest_version")
@@ -311,27 +526,23 @@ class DashboardPage(QWidget):
             self.update_btn.setEnabled(bool(result.get("download_url")))
             self.update_btn.setText(f"  Cài v{new_v}")
             self._set_update_progress(False)
+            if self.version_badge:
+                self.version_badge.setText("<span style='color:#F59E0B;'>●</span> Có bản cập nhật")
 
-            msg = f"Đã có phiên bản mới: <b>v{new_v}</b> ({result.get('version_name')})."
-            if result.get("is_critical"):
-                msg += "<br><span style='color: #EF4444;'>Đây là bản cập nhật quan trọng!</span>"
-            QMessageBox.information(self, "Cập Nhật Mới", msg)
-
-            logs = result.get("changelogs", [])
-            if logs:
-                log_html = ""
-                for log in logs:
-                    type_tag = f"<b>[{log.get('change_type', 'feat').upper()}]</b>"
-                    log_html += f"• {type_tag} {log.get('content')}<br>"
-                self.changelog_text.setText(log_html)
-            else:
-                self.changelog_text.setText("Không có changelog chi tiết cho bản này.")
+            if not silent:
+                msg = f"Đã có phiên bản mới: <b>v{new_v}</b> ({result.get('version_name')})."
+                if result.get("is_critical"):
+                    msg += "<br><span style='color: #EF4444;'>Đây là bản cập nhật quan trọng!</span>"
+                QMessageBox.information(self, "Cập Nhật Mới", msg)
             return
 
         self._latest_update_info = {}
         self.update_btn.setVisible(False)
-        self._set_update_progress(False)
-        QMessageBox.information(self, "Thông Báo", f"Bạn đang sử dụng phiên bản mới nhất (v{self.current_version}).")
+        if not silent:
+            QMessageBox.information(self, "Thông Báo", f"Bạn đang sử dụng phiên bản mới nhất (v{self.current_version}).")
+
+    def _on_check_updates(self):
+        self._start_update_check(silent=False)
 
     def _on_install_update(self):
         if self._update_worker and self._update_worker.isRunning():

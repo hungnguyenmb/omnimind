@@ -3,6 +3,7 @@ import shutil
 import platform
 import subprocess
 import logging
+import re
 import urllib.request
 import zipfile
 import tarfile
@@ -11,6 +12,7 @@ from typing import Callable, Optional
 from engine.config_manager import ConfigManager
 
 logger = logging.getLogger(__name__)
+_RUNTIME_TOKEN_PATTERN = re.compile(r"^[A-Za-z0-9._@+-]+$")
 
 DEFAULT_API_BASE_URL = os.environ.get("OMNIMIND_API_URL", "http://localhost:8050")
 DEFAULT_RELEASE_MANIFEST = {
@@ -83,6 +85,13 @@ class EnvironmentManager:
     def _resolve_codex_cmd(self) -> str:
         """Ưu tiên codex đã cài local trong app, fallback system PATH."""
         return shutil.which("codex", path=str(self.codex_bin_dir)) or shutil.which("codex") or "codex"
+
+    @staticmethod
+    def _sanitize_runtime_token(token: str, field_name: str) -> str:
+        val = str(token or "").strip()
+        if not val or not _RUNTIME_TOKEN_PATTERN.fullmatch(val):
+            raise ValueError(f"{field_name} không hợp lệ.")
+        return val
 
     def get_platform_key(self) -> str:
         """Chuẩn hóa platform key cho manifest release."""
@@ -262,27 +271,48 @@ class EnvironmentManager:
         """Sử dụng WinGet / PowerShell để cài âm thầm trên Windows."""
         policy = policy or {}
         try:
-            # Script cài đặt qua winget (Cần cửa sổ UAC của Windows)
-            script = []
-            python_pkg = policy.get("python_package_id", "Python.Python.3.11")
-            node_pkg = policy.get("node_package_id", "OpenJS.NodeJS")
+            # Cài đặt qua winget (có thể trigger UAC khi cần).
+            actions = []
+            python_pkg = self._sanitize_runtime_token(
+                policy.get("python_package_id", "Python.Python.3.11"),
+                "python_package_id",
+            )
+            node_pkg = self._sanitize_runtime_token(
+                policy.get("node_package_id", "OpenJS.NodeJS"),
+                "node_package_id",
+            )
             if "python" in missing:
-                script.append(f"winget install -e --id {python_pkg} --silent")
+                actions.append(("Python", python_pkg))
             if "node" in missing or "npm" in missing:
-                script.append(f"winget install -e --id {node_pkg} --silent")
+                actions.append(("Node.js", node_pkg))
                 
-            if not script:
+            if not actions:
                 self._emit_progress(progress_callback, 100, "Môi trường đã đầy đủ.")
                 return True
-            
-            ps_command = " ; ".join(script)
-            logger.info(f"Running Windows installer: {ps_command}")
-            self._emit_progress(progress_callback, 20, "Đang yêu cầu quyền quản trị Windows (UAC)...")
-            # Dùng powershell Start-Process để trigger UAC Admin
-            subprocess.run([
-                "powershell", "-Command", 
-                f"Start-Process powershell -ArgumentList '-NoProfile -ExecutionPolicy Bypass -Command \"{ps_command}\"' -Verb RunAs -Wait"
-            ], check=True)
+
+            step = 70 // max(1, len(actions))
+            progress = 20
+            for display, package_id in actions:
+                self._emit_progress(
+                    progress_callback,
+                    progress,
+                    f"Đang yêu cầu quyền quản trị Windows (UAC) để cài {display}...",
+                )
+                arg_list = f"install -e --id {package_id} --silent"
+                logger.info(f"Running WinGet installer for {display}: {package_id}")
+                subprocess.run(
+                    [
+                        "powershell",
+                        "-NoProfile",
+                        "-ExecutionPolicy",
+                        "Bypass",
+                        "-Command",
+                        f"Start-Process -FilePath winget -ArgumentList '{arg_list}' -Verb RunAs -Wait",
+                    ],
+                    check=True,
+                )
+                progress = min(90, progress + step)
+
             self._emit_progress(progress_callback, 90, "Đang xác minh môi trường sau cài đặt...")
             return True
         except Exception as e:
@@ -306,28 +336,41 @@ class EnvironmentManager:
                 self._emit_progress(progress_callback, 100, "Thiếu Homebrew. Vui lòng cài Homebrew trước.")
                 return False
                 
-            script = []
-            python_formula = policy.get("python_formula", "python")
-            node_formula = policy.get("node_formula", "node")
+            formulas = []
+            python_formula = self._sanitize_runtime_token(
+                policy.get("python_formula", "python"),
+                "python_formula",
+            )
+            node_formula = self._sanitize_runtime_token(
+                policy.get("node_formula", "node"),
+                "node_formula",
+            )
             if "python" in missing:
-                script.append(f"brew install {python_formula}")
+                formulas.append(("Python", python_formula))
             if "node" in missing or "npm" in missing:
-                script.append(f"brew install {node_formula}")
+                formulas.append(("Node.js", node_formula))
                 
-            if not script:
+            if not formulas:
                 self._emit_progress(progress_callback, 100, "Môi trường đã đầy đủ.")
                 return True
-            
-            sh_command = " && ".join(script)
-            logger.info(f"Running macOS installer: {sh_command}")
-            self._emit_progress(progress_callback, 20, "Đang chạy Homebrew để cài môi trường...")
-            # Note: Brew không chạy dưới root, nên chạy lệnh thường. 
-            subprocess.run(sh_command, shell=True, check=True)
+
+            step = 70 // max(1, len(formulas))
+            progress = 20
+            for display, formula in formulas:
+                logger.info(f"Running Homebrew installer for {display}: {formula}")
+                self._emit_progress(progress_callback, progress, f"Đang cài {display} bằng Homebrew...")
+                subprocess.run(["brew", "install", formula], check=True)
+                progress = min(90, progress + step)
+
             self._emit_progress(progress_callback, 90, "Đang xác minh môi trường sau cài đặt...")
             return True
         except subprocess.CalledProcessError as e:
             logger.error(f"macOS env install failed: {e}")
             self._emit_progress(progress_callback, 100, f"Cài đặt thất bại: {str(e)[:80]}")
+            return False
+        except ValueError as e:
+            logger.error(f"Invalid installer policy on macOS: {e}")
+            self._emit_progress(progress_callback, 100, str(e))
             return False
 
     def download_and_install_codex(

@@ -287,6 +287,10 @@ class VaultPage(QWidget):
         self.table.setMinimumHeight(280)
         self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
 
+        card_layout.addWidget(self.table)
+        layout.addWidget(table_card)
+        layout.addStretch()
+
     def _load_resources(self):
         """Tải dữ liệu từ DB."""
         self._resources_data = self.vault_mgr.get_all_resources()

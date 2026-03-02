@@ -11,7 +11,10 @@ from pathlib import Path
 import requests
 
 from database.db_manager import db
+from engine.action_executor import ActionExecutor
+from engine.skill_action_runners import SkillActionRunnerRegistry
 from engine.config_manager import ConfigManager
+from engine.skill_runtime_manager import SkillRuntimeManager
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +35,219 @@ class SkillManager:
         os.environ["CODEX_HOME"] = str(self.codex_home)
         self.skills_dir = self.codex_home / "skills"
         self.skills_dir.mkdir(parents=True, exist_ok=True)
+        self.action_executor = ActionExecutor()
+        self.runner_registry = SkillActionRunnerRegistry()
+        self.runtime_manager = SkillRuntimeManager(
+            skill_manager=self,
+            action_executor=self.action_executor,
+        )
+
+    @staticmethod
+    def _extract_frontmatter(text: str) -> str:
+        src = text or ""
+        if not src.startswith("---"):
+            return ""
+        lines = src.splitlines()
+        if not lines or lines[0].strip() != "---":
+            return ""
+        for idx in range(1, len(lines)):
+            if lines[idx].strip() == "---":
+                return "\n".join(lines[1:idx])
+        return ""
+
+    @staticmethod
+    def _parse_inline_list(raw: str) -> list[str]:
+        val = (raw or "").strip()
+        if not val:
+            return []
+
+        if val.startswith("[") and val.endswith("]"):
+            inner = val[1:-1].strip()
+            if not inner:
+                return []
+            parts = [p.strip().strip("'\"") for p in inner.split(",")]
+            return [p for p in parts if p]
+
+        parts = [p.strip().strip("'\"") for p in val.split(",")]
+        return [p for p in parts if p]
+
+    def _parse_skill_frontmatter(self, skill_md_path: Path) -> dict:
+        try:
+            text = skill_md_path.read_text(encoding="utf-8", errors="ignore")
+        except Exception as e:
+            logger.warning(f"Cannot read SKILL.md for frontmatter parse: {e}")
+            return {}
+
+        frontmatter = self._extract_frontmatter(text)
+        if not frontmatter:
+            return {}
+
+        data = {}
+        lines = frontmatter.splitlines()
+        i = 0
+        while i < len(lines):
+            line = lines[i].rstrip()
+            stripped = line.strip()
+            i += 1
+            if not stripped or stripped.startswith("#"):
+                continue
+            if ":" not in line or stripped.startswith("-"):
+                continue
+
+            key, raw_val = line.split(":", 1)
+            key = key.strip()
+            val = raw_val.strip()
+
+            if key != "required_capabilities":
+                data[key] = val.strip("'\"")
+                continue
+
+            if val:
+                data[key] = self._parse_inline_list(val)
+                continue
+
+            items = []
+            while i < len(lines):
+                sub = lines[i].strip()
+                if not sub:
+                    i += 1
+                    continue
+                if sub.startswith("-"):
+                    items.append(sub[1:].strip().strip("'\""))
+                    i += 1
+                    continue
+                break
+            data[key] = [x for x in items if x]
+
+        return data
+
+    @staticmethod
+    def _normalize_capabilities(capabilities) -> list[str]:
+        if not capabilities:
+            return []
+        if isinstance(capabilities, str):
+            capabilities = [capabilities]
+        out = []
+        for cap in capabilities:
+            cap_val = str(cap or "").strip().lower().replace(" ", "_")
+            if not cap_val:
+                continue
+            if cap_val not in out:
+                out.append(cap_val)
+        return out
+
+    def _save_skill_capabilities(self, skill_id: str, capabilities: list[str]):
+        try:
+            db.execute_query(
+                """
+                INSERT INTO skill_capabilities (skill_id, capabilities_json, updated_at)
+                VALUES (?, ?, CURRENT_TIMESTAMP)
+                ON CONFLICT(skill_id) DO UPDATE SET
+                    capabilities_json = excluded.capabilities_json,
+                    updated_at = CURRENT_TIMESTAMP
+                """,
+                (skill_id, json.dumps(capabilities, ensure_ascii=False)),
+                commit=True,
+            )
+        except Exception as e:
+            logger.warning(f"Cannot persist skill capabilities ({skill_id}): {e}")
+
+    def get_skill_runtime_requirements(self, skill_id: str) -> dict:
+        row = db.fetch_one(
+            "SELECT capabilities_json FROM skill_capabilities WHERE skill_id = ?",
+            (skill_id,),
+        )
+        capabilities = []
+        if row and row.get("capabilities_json"):
+            try:
+                parsed = json.loads(row.get("capabilities_json") or "[]")
+                if isinstance(parsed, list):
+                    capabilities = self._normalize_capabilities(parsed)
+            except Exception:
+                capabilities = []
+
+        preflight = self.action_executor.preflight_capabilities(
+            capabilities,
+            action_id=f"skill:{skill_id}:preflight",
+        )
+        return {
+            "success": True,
+            "skill_id": skill_id,
+            "required_capabilities": capabilities,
+            "preflight": preflight,
+        }
+
+    def execute_skill_action(
+        self,
+        skill_id: str,
+        action_id: str,
+        payload: dict | None = None,
+        required_capabilities=None,
+        runner=None,
+        auto_request_permissions: bool = False,
+    ) -> dict:
+        """
+        API runtime chuẩn cho luồng Telegram/Codex sau này:
+        - Preflight capability + permission
+        - Optional auto-request permission
+        - Execute action runner khi đủ điều kiện
+        """
+        return self.runtime_manager.execute(
+            skill_id=skill_id,
+            action_id=action_id,
+            payload=payload or {},
+            required_capabilities=required_capabilities,
+            runner=runner,
+            auto_request_permissions=auto_request_permissions,
+        )
+
+    def retry_skill_action_with_permission_request(
+        self,
+        skill_id: str,
+        action_id: str,
+        payload: dict | None = None,
+        required_capabilities=None,
+        runner=None,
+    ) -> dict:
+        return self.execute_skill_action(
+            skill_id=skill_id,
+            action_id=action_id,
+            payload=payload or {},
+            required_capabilities=required_capabilities,
+            runner=runner,
+            auto_request_permissions=True,
+        )
+
+    def execute_builtin_skill_action(
+        self,
+        skill_id: str,
+        action_id: str,
+        payload: dict | None = None,
+        auto_request_permissions: bool = False,
+    ) -> dict:
+        """
+        Execute built-in action runner qua runtime pipeline chuẩn.
+        Dùng cho bot runtime nội bộ trước khi có Telegram engine đầy đủ.
+        """
+        meta = self.runner_registry.get_action_meta(action_id)
+        if not meta:
+            return {
+                "success": False,
+                "code": "ACTION_NOT_SUPPORTED",
+                "message": f"Action built-in không hỗ trợ: {action_id}",
+                "skill_id": skill_id,
+                "action_id": action_id,
+            }
+
+        capabilities = meta.get("capabilities", []) or []
+        return self.execute_skill_action(
+            skill_id=skill_id,
+            action_id=action_id,
+            payload=payload or {},
+            required_capabilities=capabilities,
+            runner=lambda run_payload: self.runner_registry.execute(action_id, run_payload),
+            auto_request_permissions=auto_request_permissions,
+        )
 
     def _get_api_base_url(self) -> str:
         env_url = os.environ.get("OMNIMIND_API_URL", "").strip()
@@ -294,7 +510,40 @@ class SkillManager:
                 if not (candidate / "SKILL.md").exists():
                     return {"success": False, "message": "Skill package thiếu file SKILL.md."}
 
-                shutil.copytree(candidate, target_dir)
+                skill_frontmatter = self._parse_skill_frontmatter(candidate / "SKILL.md")
+                required_capabilities = self._normalize_capabilities(
+                    skill_frontmatter.get("required_capabilities", [])
+                )
+
+                # 3.1) Cài theo cơ chế staging + backup để tránh mất skill cũ nếu update lỗi.
+                staging_dir = self.skills_dir / f".{skill_id}.tmp"
+                backup_dir = self.skills_dir / f".{skill_id}.bak"
+                if staging_dir.exists():
+                    shutil.rmtree(staging_dir, ignore_errors=True)
+                if backup_dir.exists():
+                    shutil.rmtree(backup_dir, ignore_errors=True)
+
+                restore_backup = False
+                try:
+                    shutil.copytree(candidate, staging_dir)
+
+                    if target_dir.exists():
+                        target_dir.rename(backup_dir)
+                        restore_backup = True
+
+                    staging_dir.rename(target_dir)
+                    restore_backup = False
+
+                    if backup_dir.exists():
+                        shutil.rmtree(backup_dir, ignore_errors=True)
+                except Exception:
+                    if target_dir.exists():
+                        shutil.rmtree(target_dir, ignore_errors=True)
+                    if restore_backup and backup_dir.exists():
+                        backup_dir.rename(target_dir)
+                    if staging_dir.exists():
+                        shutil.rmtree(staging_dir, ignore_errors=True)
+                    raise
 
                 # 4) Cập nhật DB local
                 db.execute_query(
@@ -316,7 +565,36 @@ class SkillManager:
                     commit=True,
                 )
 
-            return {"success": True, "message": f"Cài skill '{skill_id}' thành công."}
+            self._save_skill_capabilities(skill_id, required_capabilities)
+            preflight = self.action_executor.preflight_capabilities(
+                required_capabilities,
+                action_id=f"skill:{skill_id}:install",
+            )
+
+            result = {
+                "success": True,
+                "skill_id": skill_id,
+                "message": f"Cài skill '{skill_id}' thành công.",
+                "required_capabilities": required_capabilities,
+                "permission_preflight": preflight,
+            }
+            if not preflight.get("success"):
+                missing = preflight.get("missing_permissions", [])
+                if missing:
+                    names = ", ".join(
+                        sorted({m.get("permission", "") for m in missing if m.get("permission")})
+                    )
+                    result["message"] += (
+                        f" Skill cần cấp thêm quyền hệ thống trước khi chạy action: {names}."
+                    )
+                unknown = preflight.get("unknown_capabilities", [])
+                if unknown:
+                    result["message"] += (
+                        " Skill khai báo capability chưa được app hỗ trợ: "
+                        + ", ".join(unknown)
+                        + "."
+                    )
+            return result
         except Exception as e:
             logger.error(f"install_skill error ({skill_id}): {e}")
             return {"success": False, "message": str(e)}
@@ -327,6 +605,7 @@ class SkillManager:
             if target_dir.exists():
                 shutil.rmtree(target_dir)
             db.execute_query("DELETE FROM installed_skills WHERE skill_id = ?", (skill_id,), commit=True)
+            db.execute_query("DELETE FROM skill_capabilities WHERE skill_id = ?", (skill_id,), commit=True)
             return {"success": True, "message": f"Đã gỡ skill '{skill_id}'."}
         except Exception as e:
             logger.error(f"uninstall_skill error ({skill_id}): {e}")

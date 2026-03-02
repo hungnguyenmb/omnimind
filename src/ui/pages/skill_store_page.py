@@ -177,6 +177,7 @@ class SkillStorePage(QWidget):
         self.installed_ids = set()
         self._load_worker = None
         self._action_worker = None
+        self._pending_action = None
         self._setup_ui()
         self._reload_data()
 
@@ -366,6 +367,7 @@ class SkillStorePage(QWidget):
         requires_purchase = bool(skill.get("requires_purchase", False))
         verb = "cài đặt" if action == "install" else "gỡ cài đặt"
         self._set_busy(True, f"Đang {verb} skill '{skill_id}'...")
+        self._pending_action = {"action": action, "skill_id": skill_id}
 
         self._action_worker = SkillActionWorker(
             self.manager, skill_id, action=action, requires_purchase=requires_purchase, parent=self
@@ -376,8 +378,57 @@ class SkillStorePage(QWidget):
     def _on_action_finished(self, result: dict):
         self._set_busy(False)
         self._action_worker = None
+        action_ctx = self._pending_action or {}
+        self._pending_action = None
         if result.get("success"):
             QMessageBox.information(self, "Skill Marketplace", result.get("message", "Thành công."))
+
+            if action_ctx.get("action") == "install":
+                preflight = result.get("permission_preflight", {}) or {}
+                if not preflight.get("success"):
+                    missing = preflight.get("missing_permissions", []) or []
+                    missing_names = ", ".join(
+                        sorted({m.get("permission", "") for m in missing if m.get("permission")})
+                    )
+                    ask = QMessageBox.question(
+                        self,
+                        "Cấp quyền cho skill",
+                        (
+                            "Skill đã cài đặt nhưng chưa đủ quyền để chạy một số action.\n\n"
+                            f"Quyền còn thiếu: {missing_names or 'Không xác định'}\n\n"
+                            "Bạn có muốn mở màn hình cấp quyền ngay bây giờ không?"
+                        ),
+                        QMessageBox.Ok | QMessageBox.Cancel,
+                        QMessageBox.Ok,
+                    )
+                    if ask == QMessageBox.Ok:
+                        retry = self.manager.retry_skill_action_with_permission_request(
+                            skill_id=result.get("skill_id", action_ctx.get("skill_id", "")),
+                            action_id="runtime_bootstrap",
+                            payload={},
+                            required_capabilities=result.get("required_capabilities", []),
+                            runner=None,
+                        )
+                        if retry.get("success"):
+                            QMessageBox.information(
+                                self,
+                                "Cấp quyền",
+                                "Đã preflight lại thành công. Skill sẵn sàng cho runtime action.",
+                            )
+                        else:
+                            retry_preflight = retry.get("preflight", {}) or {}
+                            retry_missing = retry_preflight.get("missing_permissions", []) or []
+                            retry_names = ", ".join(
+                                sorted({m.get("permission", "") for m in retry_missing if m.get("permission")})
+                            )
+                            QMessageBox.warning(
+                                self,
+                                "Cấp quyền chưa hoàn tất",
+                                (
+                                    "Một số quyền vẫn chưa được cấp sau khi mở Settings.\n"
+                                    f"Còn thiếu: {retry_names or 'Không xác định'}"
+                                ),
+                            )
             self._reload_data()
         else:
             QMessageBox.warning(self, "Skill Marketplace", result.get("message", "Thao tác thất bại."))

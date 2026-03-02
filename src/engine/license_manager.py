@@ -110,11 +110,44 @@ class LicenseManager:
         )
         return row["value"] if row else None
 
+    def get_saved_hwid(self) -> str | None:
+        """Đọc HWID đã cache khi kích hoạt."""
+        row = self.db.fetch_one(
+            "SELECT value FROM app_configs WHERE key = ?", ("license_hwid",)
+        )
+        return row["value"] if row else None
+
+    def get_activation_flag(self) -> bool:
+        """Đọc cờ đã kích hoạt cục bộ."""
+        row = self.db.fetch_one(
+            "SELECT value FROM app_configs WHERE key = ?", ("license_activated",)
+        )
+        if not row:
+            return False
+        val = str(row.get("value", "")).strip().lower()
+        return val in ("1", "true", "yes", "activated")
+
     def is_activated_locally(self) -> bool:
-        """Kiểm tra nhanh xem thiết bị đã từng kích hoạt thành công chưa."""
+        """
+        Kiểm tra nhanh xem thiết bị đã từng kích hoạt thành công chưa.
+        Yêu cầu mới: đã kích hoạt một lần thì các lần mở app sau đi thẳng vào app.
+        """
+        if self.get_activation_flag():
+            return True
+
         key = self.get_saved_license()
         token = self.get_saved_token()
-        return bool(key and token)
+        saved_hwid = self.get_saved_hwid()
+        legacy_activated = bool(key and (token or saved_hwid))
+        if legacy_activated:
+            # Tương thích dữ liệu cũ: nếu từng lưu key + token thì nâng cấp cờ kích hoạt.
+            self.db.execute_query(
+                "INSERT OR REPLACE INTO app_configs (key, value) VALUES (?, ?)",
+                ("license_activated", "True"),
+                commit=True,
+            )
+            return True
+        return False
 
     # ──────────────────────────────────────────────────────────────
     # 3. XÁC THỰC VỚI SERVER (Online Verify)
@@ -198,6 +231,7 @@ class LicenseManager:
             "license_plan": server_data.get("plan", "Standard"),
             "license_expires": server_data.get("expires_at", ""),
             "license_hwid": self.get_hwid(),
+            "license_activated": "True",
         }
         for key, value in configs.items():
             self.db.execute_query(
@@ -217,7 +251,7 @@ class LicenseManager:
     def clear_license(self):
         """Xoá toàn bộ dữ liệu license cục bộ (dùng khi Deactivate/Logout)."""
         keys = ["license_key", "license_jwt", "license_plan",
-                "license_expires", "license_hwid"]
+                "license_expires", "license_hwid", "license_activated"]
         for key in keys:
             self.db.execute_query(
                 "DELETE FROM app_configs WHERE key = ?", (key,), commit=True

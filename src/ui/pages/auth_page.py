@@ -12,6 +12,7 @@ from PyQt5.QtGui import QColor
 from ui.icons import Icons
 from engine.config_manager import ConfigManager
 from engine.environment_manager import EnvironmentManager
+from engine.permission_manager import PermissionManager
 import logging
 
 logger = logging.getLogger(__name__)
@@ -132,6 +133,11 @@ class AuthPage(QWidget):
         except Exception as e:
             logger.error(f"EnvironmentManager init failed: {e}")
             self.env_manager = None
+        try:
+            self.permission_manager = PermissionManager()
+        except Exception as e:
+            logger.error(f"PermissionManager init failed: {e}")
+            self.permission_manager = None
         self._setup_ui()
         try:
             self._load_settings()
@@ -598,6 +604,11 @@ class AuthPage(QWidget):
         if folder:
             self.workspace_input.setText(folder)
 
+    def _detect_system_permission_states(self) -> dict:
+        if self.permission_manager:
+            return self.permission_manager.get_status()
+        return {"accessibility": None, "screenshot": None, "camera": None}
+
     def _load_settings(self):
         """Load cấu hình từ Database lên UI."""
         token = ConfigManager.get("telegram_token", "")
@@ -610,6 +621,15 @@ class AuthPage(QWidget):
         perm_acc = ConfigManager.get("perm_accessibility", "False") == "True"
         perm_scr = ConfigManager.get("perm_screenshot", "False") == "True"
         perm_cam = ConfigManager.get("perm_camera", "False") == "True"
+
+        # Đồng bộ theo trạng thái thực tế từ hệ điều hành khi có thể.
+        os_perm = self._detect_system_permission_states()
+        if os_perm.get("accessibility") is not None:
+            perm_acc = bool(os_perm["accessibility"])
+        if os_perm.get("screenshot") is not None:
+            perm_scr = bool(os_perm["screenshot"])
+        if os_perm.get("camera") is not None:
+            perm_cam = bool(os_perm["camera"])
 
         self.token_input.setText(token)
         self.user_id_input.setText(chat_id)
@@ -632,6 +652,11 @@ class AuthPage(QWidget):
         self.perm_accessibility.blockSignals(False)
         self.perm_screenshot.blockSignals(False)
         self.perm_camera.blockSignals(False)
+
+        # Persist lại trạng thái quyền sau khi sync từ OS để các màn hình khác đọc nhất quán.
+        ConfigManager.set("perm_accessibility", str(self.perm_accessibility.isChecked()))
+        ConfigManager.set("perm_screenshot", str(self.perm_screenshot.isChecked()))
+        ConfigManager.set("perm_camera", str(self.perm_camera.isChecked()))
 
     def _save_settings(self):
         """Lưu cấu hình từ UI xuống Database."""
@@ -983,8 +1008,18 @@ class AuthPage(QWidget):
         if not checked:
             return  # Bỏ check thì không cần request
 
-        import platform, subprocess
+        import platform
         sys_name = platform.system()
+        app_display_name = (
+            self.permission_manager.get_app_display_name()
+            if self.permission_manager
+            else "OmniMind"
+        )
+
+        identity_note = (
+            f"Lưu ý: macOS sẽ hiển thị ứng dụng dưới tên \"{app_display_name}\" trong danh sách quyền.\n"
+            "Sau khi cấp quyền, hãy tắt/mở lại ứng dụng."
+        )
 
         reason_map = {
             "accessibility": (
@@ -1015,63 +1050,53 @@ class AuthPage(QWidget):
                 w.blockSignals(False)
             return
 
-        def _open_target(cmd):
-            try:
-                subprocess.Popen(cmd, shell=isinstance(cmd, str))
-                return True
-            except Exception as e:
-                logger.error(f"Open permission settings failed ({perm_type}): {e}")
-                return False
+        req_result = (
+            self.permission_manager.request(perm_type)
+            if self.permission_manager
+            else {"success": False, "open_mode": "failed"}
+        )
+        open_mode = req_result.get("open_mode", "failed")
 
         if sys_name == "Darwin":  # macOS
-            if perm_type == "accessibility":
-                # Mở Security & Privacy -> Accessibility
-                ok_open = _open_target([
-                    "open", "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"
-                ])
-            elif perm_type == "screenshot":
-                # Mở Security & Privacy -> Screen Recording
-                ok_open = _open_target([
-                    "open", "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture"
-                ])
-            elif perm_type == "camera":
-                # Mở Security & Privacy -> Camera
-                ok_open = _open_target([
-                    "open", "x-apple.systempreferences:com.apple.preference.security?Privacy_Camera"
-                ])
-            else:
-                ok_open = False
-
-            if ok_open:
+            if open_mode == "anchor":
                 QMessageBox.information(
                     self,
                     "Mở màn hình cấp quyền",
-                    "Đã mở màn hình quyền hệ thống. Hãy bật quyền cho OmniMind/Codex rồi quay lại ứng dụng.",
+                    (
+                        "Đã mở màn hình quyền hệ thống.\n"
+                        f"Hãy bật quyền cho \"{app_display_name}\" rồi quay lại ứng dụng.\n\n"
+                        f"{identity_note}"
+                    ),
+                )
+            elif open_mode == "settings":
+                QMessageBox.information(
+                    self,
+                    "Mở System Settings",
+                    (
+                        "Đã mở System Settings, nhưng không nhảy đúng trang quyền tự động.\n"
+                        "Vui lòng tự vào đúng mục quyền tương ứng để bật cho ứng dụng.\n\n"
+                        f"{identity_note}"
+                    ),
                 )
             else:
                 QMessageBox.warning(
                     self,
                     "Không thể mở màn hình quyền",
-                    "Không thể mở màn hình cấp quyền tự động. Vui lòng mở System Settings thủ công.",
+                    (
+                        "Không thể mở màn hình cấp quyền tự động. Vui lòng mở System Settings thủ công.\n\n"
+                        f"{identity_note}"
+                    ),
                 )
 
         elif sys_name == "Windows":
-            if perm_type == "accessibility":
-                # Windows: mở màn hình Accessibility
-                ok_open = _open_target("start ms-settings:easeofaccess-keyboard")
-            elif perm_type == "screenshot":
-                # Windows không có trang riêng cho screenshot tương tự macOS; mở Privacy tổng quát.
-                ok_open = _open_target("start ms-settings:privacy")
-            elif perm_type == "camera":
-                ok_open = _open_target("start ms-settings:privacy-webcam")
-            else:
-                ok_open = False
-
-            if ok_open:
+            if open_mode != "failed":
                 QMessageBox.information(
                     self,
                     "Mở màn hình cấp quyền",
-                    "Đã mở phần Settings tương ứng. Hãy cấp quyền rồi quay lại ứng dụng.",
+                    (
+                        "Đã mở phần Settings tương ứng. Hãy cấp quyền rồi quay lại ứng dụng.\n"
+                        "Sau khi cấp quyền, nên khởi động lại ứng dụng."
+                    ),
                 )
             else:
                 QMessageBox.warning(

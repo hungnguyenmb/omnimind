@@ -35,6 +35,32 @@ description: Convert meeting transcripts or notes into summary, decisions, and a
 ---
 ```
 
+`required_capabilities` là tùy chọn, dùng để khai báo quyền hệ thống cần có khi skill chạy tool nhạy cảm:
+
+```md
+---
+name: office-desktop-helper
+description: Assist with desktop workflows.
+required_capabilities:
+  - ui_automation
+  - screen_capture
+---
+```
+
+Capability hiện hỗ trợ trong app:
+- `screen_capture` -> cần quyền `screenshot`.
+- `camera_access` -> cần quyền `camera`.
+- `ui_automation` -> cần quyền `accessibility`.
+- `system_restart` -> action nhạy cảm, có thể yêu cầu quyền admin/elevation theo OS.
+
+Runtime contract phía client:
+- Khi thực thi action của skill, app gọi `SkillManager.execute_skill_action(...)`.
+- Nếu thiếu quyền, response chuẩn có:
+  - `success: false`
+  - `code: PERMISSION_REQUIRED`
+  - `preflight.missing_permissions` để UI mở màn hình cấp quyền và retry.
+- Có thể retry tự động qua `SkillManager.retry_skill_action_with_permission_request(...)`.
+
 Lưu ý:
 - `name` nên trùng `skill_id` để đồng bộ.
 - `description` phải mô tả rõ ngữ cảnh trigger.
@@ -184,4 +210,3 @@ Khuyến nghị:
 - `skill_id` trong DB khác thư mục trong zip -> khó bảo trì và gây nhầm lẫn.
 - Thiếu link download cho platform -> API `/download` trả lỗi `Skill chưa có link tải cho HĐH này`.
 - Manifest JSON sai format -> CMS không lưu được hoặc API trả metadata thiếu.
-

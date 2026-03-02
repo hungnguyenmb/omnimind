@@ -2,6 +2,8 @@ import sqlite3
 import os
 import threading
 import logging
+import platform
+import shutil
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -26,19 +28,64 @@ class DBManager:
         if self._initialized:
             return
 
-        # Mặc định lưu trong AppData/Local/OmniMind/data hoặc thư mục dự án hiện tại
+        # Ưu tiên DB path ổn định theo user profile để tránh lệch dữ liệu khi update payload.
         if db_path is None:
-            # Thử lấy từ biến môi trường hoặc dùng đường dẫn tương đối
-            base_dir = Path(__file__).parent.parent.parent
-            data_dir = base_dir / "data"
-            data_dir.mkdir(parents=True, exist_ok=True)
-            self.db_path = str(data_dir / "omnimind.db")
+            env_db = os.environ.get("OMNIMIND_DB_PATH", "").strip()
+            if env_db:
+                self.db_path = str(Path(env_db).expanduser())
+            else:
+                self.db_path = str(self._default_db_path())
         else:
-            self.db_path = db_path
+            self.db_path = str(Path(db_path).expanduser())
+
+        db_file = Path(self.db_path)
+        db_file.parent.mkdir(parents=True, exist_ok=True)
+        self._migrate_legacy_db_if_needed(db_file)
 
         self._db_lock = threading.Lock()
         self.init_db()
         self._initialized = True
+
+    @staticmethod
+    def _default_db_path() -> Path:
+        sys_name = platform.system()
+        if sys_name == "Windows":
+            base = os.environ.get("LOCALAPPDATA", os.path.expanduser("~\\AppData\\Local"))
+            return Path(base) / "OmniMind" / "data" / "omnimind.db"
+        if sys_name == "Darwin":
+            return Path(os.path.expanduser("~/Library/Application Support")) / "OmniMind" / "data" / "omnimind.db"
+        return Path(os.path.expanduser("~/.omnimind")) / "data" / "omnimind.db"
+
+    @staticmethod
+    def _legacy_db_candidates() -> list[Path]:
+        # Legacy path từng dùng theo source tree (gây lệch khi chạy từ payload update)
+        source_relative = Path(__file__).resolve().parents[2] / "data" / "omnimind.db"
+        cwd_relative = Path.cwd() / "data" / "omnimind.db"
+        candidates = [source_relative, cwd_relative]
+        unique = []
+        for path in candidates:
+            if path not in unique:
+                unique.append(path)
+        return unique
+
+    def _migrate_legacy_db_if_needed(self, target_db: Path):
+        if target_db.exists():
+            return
+        for legacy in self._legacy_db_candidates():
+            if not legacy.exists():
+                continue
+            try:
+                if legacy.resolve() == target_db.resolve():
+                    continue
+            except Exception:
+                pass
+
+            try:
+                shutil.copy2(legacy, target_db)
+                logger.info(f"Migrated legacy DB from {legacy} -> {target_db}")
+                return
+            except Exception as e:
+                logger.warning(f"Failed to migrate DB from {legacy}: {e}")
 
     def get_connection(self):
         """Trả về connection mới. Tránh lỗi thread."""
@@ -139,6 +186,27 @@ class DBManager:
                         issued_source TEXT,
                         activated_at TIMESTAMP,
                         expires_at TIMESTAMP
+                    )
+                ''')
+
+                # 9. skill_capabilities [CLIENT-SQLITE]
+                cursor.execute('''
+                    CREATE TABLE IF NOT EXISTS skill_capabilities (
+                        skill_id TEXT PRIMARY KEY,
+                        capabilities_json TEXT,
+                        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    )
+                ''')
+
+                # 10. action_audit_logs [CLIENT-SQLITE]
+                cursor.execute('''
+                    CREATE TABLE IF NOT EXISTS action_audit_logs (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        action_id TEXT,
+                        capability TEXT,
+                        status TEXT,
+                        detail TEXT,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                     )
                 ''')
 

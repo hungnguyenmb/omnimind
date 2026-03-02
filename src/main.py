@@ -7,6 +7,7 @@ import sys
 import os
 import logging
 import sqlite3
+import platform
 from pathlib import Path
 from PyQt5.QtWidgets import QApplication
 from PyQt5.QtCore import Qt
@@ -16,8 +17,20 @@ logger = logging.getLogger(__name__)
 
 
 def _get_local_db_path() -> Path:
-    base_dir = Path(__file__).resolve().parent.parent
-    data_dir = base_dir / "data"
+    env_db = os.environ.get("OMNIMIND_DB_PATH", "").strip()
+    if env_db:
+        db_path = Path(env_db).expanduser()
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+        return db_path
+
+    sys_name = platform.system()
+    if sys_name == "Windows":
+        base = os.environ.get("LOCALAPPDATA", os.path.expanduser("~\\AppData\\Local"))
+        data_dir = Path(base) / "OmniMind" / "data"
+    elif sys_name == "Darwin":
+        data_dir = Path(os.path.expanduser("~/Library/Application Support")) / "OmniMind" / "data"
+    else:
+        data_dir = Path(os.path.expanduser("~/.omnimind")) / "data"
     data_dir.mkdir(parents=True, exist_ok=True)
     return data_dir / "omnimind.db"
 
@@ -99,6 +112,8 @@ def _bootstrap_update_overlay():
 
 
 def main():
+    # Đồng bộ DB path ổn định trước khi import các module có thể khởi tạo DB singleton.
+    os.environ["OMNIMIND_DB_PATH"] = str(_get_local_db_path())
     _bootstrap_update_overlay()
 
     # Chuẩn hóa CODEX_HOME ngay khi app khởi động để các module dùng cùng 1 path skills/auth.
