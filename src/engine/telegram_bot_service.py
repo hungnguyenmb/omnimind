@@ -1,4 +1,5 @@
 import logging
+import json
 import os
 import platform
 import re
@@ -154,6 +155,7 @@ class TelegramBotService:
     POLL_TIMEOUT_SEC = 25
     STREAM_THROTTLE_SEC = 0.8
     MAX_ARTIFACT_SEND_BYTES = 49 * 1024 * 1024
+    RUNTIME_DEBUG_LOG_MAX_BYTES = 8 * 1024 * 1024
 
     def __init__(self):
         self._stop_event = threading.Event()
@@ -335,6 +337,72 @@ class TelegramBotService:
         if not match:
             return ""
         return str(match.group(1)).strip()
+
+    @staticmethod
+    def _runtime_debug_log_path() -> Path:
+        if platform.system() == "Windows":
+            base = os.environ.get("LOCALAPPDATA", os.path.expanduser("~\\AppData\\Local"))
+            root = Path(base) / "OmniMind" / "logs"
+        elif platform.system() == "Darwin":
+            root = Path(os.path.expanduser("~/Library/Application Support")) / "OmniMind" / "logs"
+        else:
+            root = Path(os.path.expanduser("~/.omnimind")) / "logs"
+        root.mkdir(parents=True, exist_ok=True)
+        return root / "codex_runtime_stream.jsonl"
+
+    def _append_runtime_debug_log(self, payload: dict):
+        try:
+            log_path = self._runtime_debug_log_path()
+            if log_path.exists() and log_path.stat().st_size > self.RUNTIME_DEBUG_LOG_MAX_BYTES:
+                backup = log_path.with_suffix(".jsonl.1")
+                try:
+                    if backup.exists():
+                        backup.unlink()
+                except Exception:
+                    pass
+                log_path.rename(backup)
+
+            row = {
+                "ts": datetime.utcnow().isoformat() + "Z",
+                **(payload or {}),
+            }
+            with open(log_path, "a", encoding="utf-8") as f:
+                f.write(json.dumps(row, ensure_ascii=False) + "\n")
+        except Exception as e:
+            logger.warning(f"append runtime debug log failed: {e}")
+
+    @staticmethod
+    def _stream_preview_log_path() -> Path:
+        if platform.system() == "Windows":
+            base = os.environ.get("LOCALAPPDATA", os.path.expanduser("~\\AppData\\Local"))
+            root = Path(base) / "OmniMind" / "logs"
+        elif platform.system() == "Darwin":
+            root = Path(os.path.expanduser("~/Library/Application Support")) / "OmniMind" / "logs"
+        else:
+            root = Path(os.path.expanduser("~/.omnimind")) / "logs"
+        root.mkdir(parents=True, exist_ok=True)
+        return root / "codex_stream_preview_sent.jsonl"
+
+    def _append_stream_preview_log(self, payload: dict):
+        try:
+            log_path = self._stream_preview_log_path()
+            if log_path.exists() and log_path.stat().st_size > self.RUNTIME_DEBUG_LOG_MAX_BYTES:
+                backup = log_path.with_suffix(".jsonl.1")
+                try:
+                    if backup.exists():
+                        backup.unlink()
+                except Exception:
+                    pass
+                log_path.rename(backup)
+
+            row = {
+                "ts": datetime.utcnow().isoformat() + "Z",
+                **(payload or {}),
+            }
+            with open(log_path, "a", encoding="utf-8") as f:
+                f.write(json.dumps(row, ensure_ascii=False) + "\n")
+        except Exception as e:
+            logger.warning(f"append stream preview log failed: {e}")
 
     def _extract_send_document_directives(self, text: str) -> tuple[str, list[dict]]:
         directives: list[dict] = []
@@ -792,22 +860,212 @@ class TelegramBotService:
         return "\n\n".join(prompt_parts).strip(), context
 
     def _stream_codex_response(
-        self, transport: TelegramStreamTransport, chat_id: str, prompt: str
+        self,
+        transport: TelegramStreamTransport,
+        chat_id: str,
+        prompt: str,
+        log_context: dict | None = None,
     ) -> tuple[str, int | None]:
+        trace = dict(log_context or {})
+        self._append_runtime_debug_log(
+            {
+                "phase": "start",
+                "chat_id": str(chat_id),
+                "prompt_preview": str(prompt or "")[:800],
+                **trace,
+            }
+        )
+
         draft_id = None
         try:
             draft_id = transport.send_message(chat_id, "🤔 AI đang suy nghĩ câu trả lời...")
+            self._append_stream_preview_log(
+                {
+                    "phase": "preview_init",
+                    "chat_id": str(chat_id),
+                    "draft_message_id": int(draft_id),
+                    "preview_text": "🤔 AI đang suy nghĩ câu trả lời...",
+                    **trace,
+                }
+            )
         except Exception:
             draft_id = None
 
         output_chunks: list[str] = []
+        thinking_buffer = ""
+        last_stream_sent = 0.0
+        last_stream_text = ""
+        chunk_index = 0
+        runtime_event_stream_active = False
+
+        def _is_system_noise(line: str) -> bool:
+            low = str(line or "").strip().lower()
+            if not low:
+                return True
+            banned_fragments = (
+                "đang kết nối codex app-server",
+                "kết nối app-server",
+                "đang gửi yêu cầu cho codex",
+                "codex_state::runtime",
+                "failed to open state db",
+                "resolved migrations",
+                "httpconnectionpool(",
+                "connection refused",
+                "migration ",
+                "warn ",
+                "warning:",
+                "runtime:",
+            )
+            if any(x in low for x in banned_fragments):
+                return True
+            if re.match(r"^\d{4}-\d{2}-\d{2}t\d{2}:\d{2}:\d{2}", low):
+                return True
+            return False
+
+        def _normalize_thinking_text(text: str) -> str:
+            body = str(text or "")
+            if not body:
+                return ""
+            body = body.replace("\\n", "\n").replace("/n", "\n")
+            body = body.replace("\r", "")
+            body = body.replace("**", "")
+            body = re.sub(r"[ \t]{2,}", " ", body)
+            body = re.sub(r"\n{3,}", "\n\n", body)
+            return body.strip()
+
+        def _append_thinking_delta(delta: str):
+            nonlocal thinking_buffer
+            raw = str(delta or "")
+            if not raw:
+                return
+            # Bỏ các delta chỉ là noise runtime.
+            if _is_system_noise(raw):
+                return
+            thinking_buffer += raw
+            if len(thinking_buffer) > 5000:
+                thinking_buffer = thinking_buffer[-5000:]
+
+        def _flush_thinking(force: bool = False):
+            nonlocal last_stream_sent, last_stream_text
+            if not draft_id:
+                return
+            now = time.monotonic()
+            if not force and now - last_stream_sent < self.STREAM_THROTTLE_SEC:
+                return
+            text = "🤔 AI đang suy nghĩ câu trả lời..."
+            normalized = _normalize_thinking_text(thinking_buffer)
+            if normalized:
+                lines = [ln.strip() for ln in normalized.splitlines() if ln.strip()]
+                if lines:
+                    snippet = "\n".join(lines[-3:])
+                else:
+                    snippet = normalized[-280:]
+                if len(snippet) > 320:
+                    snippet = "..." + snippet[-317:]
+                text += "\n" + snippet
+            if text == last_stream_text and not force:
+                return
+            try:
+                transport.edit_message(chat_id, draft_id, text)
+                last_stream_sent = now
+                last_stream_text = text
+                self._append_stream_preview_log(
+                    {
+                        "phase": "preview_sent",
+                        "chat_id": str(chat_id),
+                        "draft_message_id": int(draft_id),
+                        "preview_text": text,
+                        "thinking_snippet": text.replace("🤔 AI đang suy nghĩ câu trả lời...", "").strip(),
+                        "thinking_buffer_tail": _normalize_thinking_text(thinking_buffer)[-1000:],
+                        **trace,
+                    }
+                )
+            except Exception:
+                return
+
+        def on_runtime_event(evt: dict):
+            nonlocal runtime_event_stream_active
+            try:
+                kind = str((evt or {}).get("kind") or "").strip().lower()
+                text = str((evt or {}).get("text") or "").strip()
+                raw = (evt or {}).get("raw") or {}
+                method = str(raw.get("method") or "").strip()
+                params = raw.get("params") or {}
+                delta_raw = str(params.get("delta") or "")
+
+                self._append_runtime_debug_log(
+                    {
+                        "phase": "runtime_event",
+                        "kind": kind,
+                        "text": text,
+                        "raw": (evt or {}).get("raw"),
+                        **trace,
+                    }
+                )
+                if not text:
+                    return
+
+                # Chỉ lấy stream từ item/* để tránh nhân bản 3 lần (item + codex/event + wrapper).
+                if method and not method.startswith("item/"):
+                    return
+                runtime_event_stream_active = True
+
+                if kind == "reasoning":
+                    _append_thinking_delta(delta_raw or text)
+                    _flush_thinking()
+                    return
+                if kind == "assistant_delta":
+                    _append_thinking_delta(delta_raw or text)
+                    _flush_thinking()
+                    return
+                if kind == "tool":
+                    tool_line = str(text or "").strip()
+                    if tool_line and not _is_system_noise(tool_line):
+                        _append_thinking_delta("\n" + tool_line)
+                        _flush_thinking()
+            except Exception as e:
+                logger.warning(f"on_runtime_event parse warning: {e}")
+
         def on_chunk(chunk: str):
+            nonlocal chunk_index
+            chunk_index += 1
             output_chunks.append(chunk)
+            self._append_runtime_debug_log(
+                {
+                    "phase": "chunk",
+                    "chunk_index": chunk_index,
+                    "text": str(chunk or ""),
+                    **trace,
+                }
+            )
+            # Khi đã có luồng runtime_event chuẩn, bỏ parse chunk để tránh ghép trùng.
+            if runtime_event_stream_active:
+                return
+            raw = str(chunk or "")
+            if "thinking" not in raw.lower():
+                return
+            for line in raw.splitlines():
+                stripped = line.strip()
+                if stripped.lower() == "thinking":
+                    continue
+                _append_thinking_delta(stripped)
+            _flush_thinking()
 
         result = self._codex_bridge.stream_reply(
             prompt=prompt,
             on_chunk=on_chunk,
+            runtime_event_callback=on_runtime_event,
             timeout_sec=600,
+        )
+        self._append_runtime_debug_log(
+            {
+                "phase": "result",
+                "success": bool(result.get("success")),
+                "mode": str(result.get("mode") or ""),
+                "message": str(result.get("message") or ""),
+                "output_preview": str(result.get("output") or "")[:2000],
+                **trace,
+            }
         )
         final_text = self._extract_final_response(result.get("output") or "")
         if not result.get("success"):
@@ -822,6 +1080,13 @@ class TelegramBotService:
         if not final_text:
             final_text = "Codex không trả nội dung."
         final_text = self._dedupe_response_text(final_text) or "Codex không trả nội dung."
+        self._append_runtime_debug_log(
+            {
+                "phase": "final_text",
+                "final_text": final_text,
+                **trace,
+            }
+        )
         return final_text, draft_id
 
     def _handle_text_message(
@@ -837,7 +1102,15 @@ class TelegramBotService:
 
         try:
             prompt, context = self._build_codex_prompt(user_text)
-            raw_response, draft_id = self._stream_codex_response(transport, chat_id, prompt)
+            raw_response, draft_id = self._stream_codex_response(
+                transport,
+                chat_id,
+                prompt,
+                log_context={
+                    "telegram_update_id": update_id,
+                    "telegram_message_id": message_id,
+                },
+            )
             response, send_directives = self._extract_send_document_directives(raw_response)
             response = response or "Codex không trả nội dung."
 
