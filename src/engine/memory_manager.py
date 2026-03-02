@@ -19,6 +19,41 @@ class MemoryManager:
             return []
 
     @staticmethod
+    def get_active_rules():
+        """Lấy danh sách quy tắc đang bật để inject vào prompt runtime."""
+        try:
+            return db.fetch_all(
+                "SELECT id, title, content FROM memory_rules WHERE is_active = 1 ORDER BY id ASC"
+            )
+        except Exception as e:
+            logger.error(f"Error fetching active memory rules: {e}")
+            return []
+
+    @staticmethod
+    def build_rules_prompt(max_chars: int = 2400) -> str:
+        """
+        Gom các rule active thành khối text ngắn gọn để chèn vào prompt.
+        """
+        rules = MemoryManager.get_active_rules()
+        if not rules:
+            return ""
+
+        out = []
+        used = 0
+        limit = max(400, int(max_chars or 2400))
+        for idx, rule in enumerate(rules, start=1):
+            title = str(rule.get("title") or "").strip()
+            content = str(rule.get("content") or "").strip()
+            if not content:
+                continue
+            line = f"{idx}. [{title or 'Rule'}] {content}"
+            if used + len(line) > limit:
+                break
+            out.append(line)
+            used += len(line)
+        return "\n".join(out).strip()
+
+    @staticmethod
     def add_rule(title, content, is_active=True):
         """Thêm quy tắc mới."""
         try:

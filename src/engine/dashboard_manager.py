@@ -2,6 +2,7 @@ import logging
 import platform
 from engine.config_manager import ConfigManager
 from engine.update_manager import UpdateManager
+from engine.telegram_bot_service import get_global_telegram_bot_service
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +46,19 @@ class DashboardManager:
             target_version=target_version,
             progress_callback=progress_callback,
         )
+
+    def start_telegram_bot(self) -> dict:
+        return get_global_telegram_bot_service().start()
+
+    def stop_telegram_bot(self) -> dict:
+        return get_global_telegram_bot_service().stop()
+
+    def get_telegram_bot_status(self) -> dict:
+        service = get_global_telegram_bot_service()
+        return {
+            "running": service.is_running(),
+            "enabled": ConfigManager.get("bot_enabled", "False") == "True",
+        }
 
     def get_system_info(self) -> dict:
         """Lấy thông tin hệ thống cho Dashboard."""

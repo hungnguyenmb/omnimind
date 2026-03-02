@@ -267,6 +267,14 @@ class EnvironmentManager:
         """Ưu tiên codex đã cài local trong app, fallback system PATH."""
         return shutil.which("codex", path=str(self.codex_bin_dir)) or shutil.which("codex") or "codex"
 
+    def resolve_codex_command(self) -> str:
+        """Public wrapper để các runtime services dùng cùng chiến lược resolve codex binary."""
+        return self._resolve_codex_cmd()
+
+    def get_codex_env(self) -> dict:
+        """Public wrapper để đồng bộ env runtime Codex (CODEX_HOME/model/sandbox/approval)."""
+        return self._codex_env()
+
     @staticmethod
     def _sanitize_runtime_token(token: str, field_name: str) -> str:
         val = str(token or "").strip()

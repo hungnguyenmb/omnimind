@@ -55,3 +55,33 @@ Các ý chính cần triển khai:
 3. Gửi lại file tài liệu do Codex tạo.
 4. SePay payment + webhook + cấp quyền.
 
+---
+
+## Roadmap Sprint
+
+### Sprint 1 (Đã hoàn tất)
+- Chuẩn hoá download Codex theo `platform + arch` từ backend/CMS.
+- Thêm API + CMS quản lý Codex release matrix.
+- Client cài Codex theo release matrix và verify checksum.
+
+### Sprint 2 (Đang triển khai)
+- Xây nền trợ lý stateful trên SQLite:
+  - `assistant_profile`
+  - `conversation_messages`
+  - `memory_summaries`
+  - `memory_facts`
+- Tối ưu truy vấn memory context bằng index + retention policy.
+- Chuẩn bị sẵn manager cho luồng Telegram/Codex lấy context.
+
+### Sprint 3 (Đang triển khai)
+- Luồng Telegram thực chiến:
+  - Hoàn tất lớp transport stream Telegram (`sendMessage` + `editMessageText`, chunking, throttle).
+  - Hoàn tất Telegram long-polling service và nối vào nút Bật/Tắt Bot ở Dashboard.
+  - Kết nối memory context + runtime interaction log cho tin nhắn Telegram.
+  - Nối Telegram service với Codex CLI runtime (`codex exec`) và stream stdout realtime về Telegram.
+  - Nhận ảnh/tài liệu từ Telegram, lưu thư mục chuẩn theo OS và bơm local path vào prompt Codex.
+  - Gửi lại artifact local (nếu Codex trả về đường dẫn file hợp lệ) qua `sendDocument`.
+- Việc còn lại:
+  - Tăng độ chính xác parser artifact path (hiện đang theo regex heuristic).
+  - Bổ sung policy allowlist path trước khi gửi file ngược Telegram.
+  - Chuẩn hóa luồng multimodal nếu muốn phân tích ảnh native theo model vision.

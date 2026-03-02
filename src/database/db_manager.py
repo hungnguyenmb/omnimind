@@ -91,7 +91,23 @@ class DBManager:
         """Trả về connection mới. Tránh lỗi thread."""
         conn = sqlite3.connect(self.db_path, check_same_thread=False)
         conn.row_factory = sqlite3.Row  # Trả về dict-like thay vì tuple
+        self._configure_connection(conn)
         return conn
+
+    @staticmethod
+    def _configure_connection(conn: sqlite3.Connection):
+        """
+        Thiết lập pragma an toàn cho workload nhiều đọc/ghi:
+        - WAL giúp UI + worker truy cập đồng thời ổn định hơn.
+        - synchronous=NORMAL cân bằng tốc độ và độ bền dữ liệu.
+        """
+        try:
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA synchronous=NORMAL")
+            conn.execute("PRAGMA foreign_keys=ON")
+        except Exception:
+            # Không chặn app nếu sqlite build cũ không hỗ trợ một vài pragma.
+            pass
 
     def init_db(self):
         """Tạo các bảng cục bộ [CLIENT-SQLITE] và Cache [BOTH] nếu chưa tồn tại"""
@@ -210,6 +226,97 @@ class DBManager:
                     )
                 ''')
 
+                # 11. assistant_profile [CLIENT-SQLITE]
+                # Single-user profile cho trợ lý cá nhân trên 1 máy.
+                cursor.execute('''
+                    CREATE TABLE IF NOT EXISTS assistant_profile (
+                        id INTEGER PRIMARY KEY CHECK (id = 1),
+                        display_name TEXT DEFAULT '',
+                        persona_prompt TEXT DEFAULT '',
+                        preferences_json TEXT DEFAULT '{}',
+                        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    )
+                ''')
+                cursor.execute(
+                    '''
+                    INSERT INTO assistant_profile (id, display_name, persona_prompt, preferences_json)
+                    VALUES (1, '', '', '{}')
+                    ON CONFLICT(id) DO NOTHING
+                    '''
+                )
+
+                # 12. conversation_messages [CLIENT-SQLITE]
+                cursor.execute('''
+                    CREATE TABLE IF NOT EXISTS conversation_messages (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        role TEXT NOT NULL,
+                        content TEXT NOT NULL,
+                        source TEXT DEFAULT 'local',
+                        external_id TEXT DEFAULT '',
+                        token_estimate INTEGER DEFAULT 0,
+                        metadata_json TEXT DEFAULT '{}',
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    )
+                ''')
+
+                # 13. memory_summaries [CLIENT-SQLITE]
+                cursor.execute('''
+                    CREATE TABLE IF NOT EXISTS memory_summaries (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        summary_text TEXT NOT NULL,
+                        from_message_id INTEGER,
+                        to_message_id INTEGER,
+                        source TEXT DEFAULT 'auto',
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    )
+                ''')
+
+                # 14. memory_facts [CLIENT-SQLITE]
+                cursor.execute('''
+                    CREATE TABLE IF NOT EXISTS memory_facts (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        fact_key TEXT UNIQUE,
+                        fact TEXT NOT NULL,
+                        importance INTEGER DEFAULT 3,
+                        confidence REAL DEFAULT 0.5,
+                        hit_count INTEGER DEFAULT 1,
+                        last_seen_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        source_message_id INTEGER,
+                        is_active BOOLEAN DEFAULT 1,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    )
+                ''')
+
+                # Migrate cột mới cho DB cũ.
+                self._ensure_column(cursor, "conversation_messages", "external_id", "TEXT DEFAULT ''")
+                self._ensure_column(cursor, "conversation_messages", "token_estimate", "INTEGER DEFAULT 0")
+                self._ensure_column(cursor, "memory_facts", "confidence", "REAL DEFAULT 0.5")
+                self._ensure_column(cursor, "memory_facts", "hit_count", "INTEGER DEFAULT 1")
+                self._ensure_column(cursor, "memory_facts", "last_seen_at", "TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
+
+                # Indexes cho Sprint 2: tăng tốc truy vấn memory context.
+                cursor.execute('''
+                    CREATE INDEX IF NOT EXISTS idx_conversation_messages_created
+                    ON conversation_messages (created_at DESC)
+                ''')
+                cursor.execute('''
+                    CREATE INDEX IF NOT EXISTS idx_conversation_messages_role
+                    ON conversation_messages (role)
+                ''')
+                cursor.execute('''
+                    CREATE INDEX IF NOT EXISTS idx_conversation_messages_source_external
+                    ON conversation_messages (source, external_id)
+                ''')
+                cursor.execute('''
+                    CREATE INDEX IF NOT EXISTS idx_memory_summaries_to_message
+                    ON memory_summaries (to_message_id DESC, created_at DESC)
+                ''')
+                cursor.execute('''
+                    CREATE INDEX IF NOT EXISTS idx_memory_facts_active_importance
+                    ON memory_facts (is_active, importance DESC, updated_at DESC)
+                ''')
+
                 conn.commit()
                 logger.info("Database initialized successfully.")
             except Exception as e:
@@ -218,6 +325,21 @@ class DBManager:
                 raise e
             finally:
                 conn.close()
+
+    @staticmethod
+    def _ensure_column(cursor: sqlite3.Cursor, table_name: str, column_name: str, column_def: str):
+        """
+        Bổ sung cột khi nâng cấp schema cũ.
+        SQLite không hỗ trợ IF NOT EXISTS cho ADD COLUMN nên cần tự kiểm tra.
+        """
+        try:
+            cursor.execute(f"PRAGMA table_info({table_name})")
+            existing = {str(row[1]) for row in cursor.fetchall()}
+            if column_name in existing:
+                return
+            cursor.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_def}")
+        except Exception as e:
+            logger.warning(f"Cannot ensure column {table_name}.{column_name}: {e}")
 
     def execute_query(self, query, params=(), commit=False):
         """Thực thi query an toàn (cho INSERT, UPDATE, DELETE)"""

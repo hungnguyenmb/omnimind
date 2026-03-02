@@ -13,6 +13,7 @@ import requests
 from database.db_manager import db
 from engine.action_executor import ActionExecutor
 from engine.skill_action_runners import SkillActionRunnerRegistry
+from engine.assistant_memory_manager import AssistantMemoryManager
 from engine.config_manager import ConfigManager
 from engine.skill_runtime_manager import SkillRuntimeManager
 
@@ -37,6 +38,7 @@ class SkillManager:
         self.skills_dir.mkdir(parents=True, exist_ok=True)
         self.action_executor = ActionExecutor()
         self.runner_registry = SkillActionRunnerRegistry()
+        self.memory_manager = AssistantMemoryManager()
         self.runtime_manager = SkillRuntimeManager(
             skill_manager=self,
             action_executor=self.action_executor,
@@ -247,6 +249,60 @@ class SkillManager:
             required_capabilities=capabilities,
             runner=lambda run_payload: self.runner_registry.execute(action_id, run_payload),
             auto_request_permissions=auto_request_permissions,
+        )
+
+    def record_runtime_interaction(
+        self,
+        user_text: str,
+        assistant_text: str,
+        source: str = "telegram",
+        metadata: dict | None = None,
+        user_external_id: str | None = None,
+        assistant_external_id: str | None = None,
+    ) -> dict:
+        """
+        API nền cho Sprint 2:
+        - Log message theo turn
+        - Auto summary batch
+        - Auto fact extraction có confidence
+        - Retention sau ingest để tránh phình DB
+        """
+        result = self.memory_manager.ingest_turn(
+            user_text=user_text,
+            assistant_text=assistant_text,
+            source=source,
+            metadata=metadata or {},
+            user_external_id=user_external_id,
+            assistant_external_id=assistant_external_id,
+            auto_summary=True,
+            auto_fact=True,
+        )
+        # Giữ DB gọn nhẹ, tránh tăng trưởng vô hạn.
+        self.memory_manager.prune_history()
+        return result
+
+    def get_runtime_conversation_context(
+        self,
+        message_limit: int = 20,
+        facts_limit: int = 20,
+        char_budget: int = 12000,
+    ) -> dict:
+        return self.memory_manager.build_runtime_context(
+            message_limit=message_limit,
+            facts_limit=facts_limit,
+            char_budget=char_budget,
+        )
+
+    def update_assistant_profile(
+        self,
+        display_name: str | None = None,
+        persona_prompt: str | None = None,
+        preferences: dict | None = None,
+    ) -> bool:
+        return self.memory_manager.update_profile(
+            display_name=display_name,
+            persona_prompt=persona_prompt,
+            preferences=preferences or {},
         )
 
     def _get_api_base_url(self) -> str:

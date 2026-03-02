@@ -126,6 +126,8 @@ def main():
 
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
+    from engine.telegram_bot_service import stop_global_telegram_bot_service
+    app.aboutToQuit.connect(stop_global_telegram_bot_service)
 
     # Load stylesheet
     try:

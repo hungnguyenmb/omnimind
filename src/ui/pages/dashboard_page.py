@@ -22,7 +22,6 @@ from PyQt5.QtWidgets import (
 )
 
 from engine.dashboard_manager import DashboardManager
-from engine.config_manager import ConfigManager
 from engine.skill_manager import SkillManager
 from ui.icons import Icons
 
@@ -97,6 +96,25 @@ class BotRuntimeActionWorker(QThread):
         self.finished.emit(result)
 
 
+class BotToggleWorker(QThread):
+    finished = pyqtSignal(dict)
+
+    def __init__(self, dashboard_mgr: DashboardManager, enable: bool, parent=None):
+        super().__init__(parent)
+        self.dashboard_mgr = dashboard_mgr
+        self.enable = bool(enable)
+
+    def run(self):
+        try:
+            if self.enable:
+                result = self.dashboard_mgr.start_telegram_bot()
+            else:
+                result = self.dashboard_mgr.stop_telegram_bot()
+        except Exception as e:
+            result = {"success": False, "message": str(e)}
+        self.finished.emit(result)
+
+
 def _detect_os():
     """Phát hiện hệ điều hành, trả về (name, version, icon_emoji)."""
     sys_name = platform.system()
@@ -122,7 +140,9 @@ class DashboardPage(QWidget):
         self._update_worker = None
         self._check_worker = None
         self._bot_action_worker = None
+        self._bot_toggle_worker = None
         self._pending_bot_action = ""
+        self._pending_bot_enable = False
         self._latest_update_info = {}
 
         # Widgets to update later
@@ -350,7 +370,11 @@ class DashboardPage(QWidget):
             self.version_val.setText(f"v{self.current_version}")
 
     def _load_bot_status(self):
-        enabled = ConfigManager.get("bot_enabled", "False") == "True"
+        status = self.dashboard_mgr.get_telegram_bot_status()
+        if status.get("enabled") and not status.get("running"):
+            self.dashboard_mgr.start_telegram_bot()
+            status = self.dashboard_mgr.get_telegram_bot_status()
+        enabled = bool(status.get("running", False))
         self._apply_bot_ui(enabled)
 
     def _apply_bot_ui(self, enabled: bool):
@@ -409,17 +433,38 @@ class DashboardPage(QWidget):
         self._bot_action_worker.start()
 
     def _toggle_bot(self):
-        enabled = ConfigManager.get("bot_enabled", "False") == "True"
-        if enabled:
-            ConfigManager.set("bot_enabled", "False")
-            self._apply_bot_ui(False)
+        if self._bot_toggle_worker and self._bot_toggle_worker.isRunning():
             return
+        current = self.dashboard_mgr.get_telegram_bot_status()
+        enable = not bool(current.get("running", False))
+        self._pending_bot_enable = enable
 
-        self.bot_toggle_btn.setText("  Đang bật...")
-        self._run_bot_action("toggle_on", "runtime_ping", payload={}, auto_request_permissions=False)
+        self.bot_toggle_btn.setEnabled(False)
+        self.bot_test_capture_btn.setEnabled(False)
+        self.bot_toggle_btn.setText("  Đang bật..." if enable else "  Đang tắt...")
+
+        self._bot_toggle_worker = BotToggleWorker(self.dashboard_mgr, enable=enable, parent=self)
+        self._bot_toggle_worker.finished.connect(self._on_bot_toggle_finished)
+        self._bot_toggle_worker.start()
+
+    def _on_bot_toggle_finished(self, result: dict):
+        enable = self._pending_bot_enable
+        self._bot_toggle_worker = None
+        self.bot_toggle_btn.setEnabled(True)
+        self.bot_test_capture_btn.setEnabled(True)
+
+        if not result.get("success"):
+            self._load_bot_status()
+            QMessageBox.warning(
+                self,
+                "Điều khiển Bot thất bại",
+                result.get("message", "Không thể thay đổi trạng thái Telegram bot."),
+            )
+            return
+        self._apply_bot_ui(enable)
 
     def _test_runtime_screen_capture(self):
-        enabled = ConfigManager.get("bot_enabled", "False") == "True"
+        enabled = bool(self.dashboard_mgr.get_telegram_bot_status().get("running", False))
         if not enabled:
             QMessageBox.information(self, "Bot chưa bật", "Hãy bật Bot trước khi test runtime action.")
             return
@@ -438,19 +483,6 @@ class DashboardPage(QWidget):
 
         op = self._pending_bot_action
         self._pending_bot_action = ""
-
-        if op == "toggle_on":
-            if result.get("success"):
-                ConfigManager.set("bot_enabled", "True")
-                self._apply_bot_ui(True)
-            else:
-                self._apply_bot_ui(False)
-                QMessageBox.warning(
-                    self,
-                    "Không thể bật Bot",
-                    result.get("message", "Không thể khởi tạo runtime bot."),
-                )
-            return
 
         if op == "screen_capture_test":
             if result.get("success"):

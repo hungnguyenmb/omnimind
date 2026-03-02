@@ -12,6 +12,7 @@ from PyQt5.QtCore import Qt
 from PyQt5.QtGui import QColor
 from ui.icons import Icons
 from engine.memory_manager import MemoryManager
+from engine.assistant_memory_manager import AssistantMemoryManager
 
 
 class RuleDialog(QDialog):
@@ -101,7 +102,12 @@ class MemoryPage(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.memory_mgr = MemoryManager()
+        self.assistant_mem_mgr = AssistantMemoryManager()
+        self.assistant_name_input = None
+        self.assistant_persona_input = None
+        self.assistant_hint = None
         self._setup_ui()
+        self._load_profile()
         self._load_rules()
 
     def _setup_ui(self):
@@ -123,6 +129,63 @@ class MemoryPage(QWidget):
         h_layout.addWidget(title)
         h_layout.addWidget(desc)
         layout.addWidget(header)
+
+        # ── Assistant Profile Card ──
+        profile_card = QFrame()
+        profile_card.setObjectName("Card")
+        profile_shadow = QGraphicsDropShadowEffect()
+        profile_shadow.setBlurRadius(20)
+        profile_shadow.setColor(QColor(0, 0, 0, 12))
+        profile_shadow.setOffset(0, 4)
+        profile_card.setGraphicsEffect(profile_shadow)
+
+        profile_layout = QVBoxLayout(profile_card)
+        profile_layout.setContentsMargins(22, 18, 22, 18)
+        profile_layout.setSpacing(10)
+
+        profile_title = QLabel("Hồ Sơ Trợ Lý (Assistant Profile)")
+        profile_title.setStyleSheet("font-size: 14px; font-weight: 700; color: #0F172A;")
+        profile_layout.addWidget(profile_title)
+
+        profile_desc = QLabel(
+            "Thông tin này sẽ được inject vào prompt để Codex hiểu cách xưng hô và phong cách phản hồi mong muốn."
+        )
+        profile_desc.setStyleSheet("font-size: 12px; color: #64748B;")
+        profile_desc.setWordWrap(True)
+        profile_layout.addWidget(profile_desc)
+
+        row1 = QHBoxLayout()
+        row1.setSpacing(10)
+        self.assistant_name_input = QLineEdit()
+        self.assistant_name_input.setObjectName("FormInput")
+        self.assistant_name_input.setPlaceholderText("Tên hiển thị người dùng (VD: Anh Hùng)")
+        self.assistant_name_input.setMinimumHeight(40)
+        row1.addWidget(self.assistant_name_input, 1)
+
+        save_profile_btn = QPushButton("  Lưu Hồ Sơ")
+        save_profile_btn.setObjectName("PrimaryBtn")
+        save_profile_btn.setIcon(Icons.check_circle("#FFFFFF", 16))
+        save_profile_btn.setCursor(Qt.PointingHandCursor)
+        save_profile_btn.setMinimumHeight(40)
+        save_profile_btn.setMinimumWidth(150)
+        save_profile_btn.clicked.connect(self._save_profile)
+        row1.addWidget(save_profile_btn)
+        profile_layout.addLayout(row1)
+
+        self.assistant_persona_input = QTextEdit()
+        self.assistant_persona_input.setObjectName("FormInput")
+        self.assistant_persona_input.setPlaceholderText(
+            "Persona của trợ lý (VD: Luôn trả lời ngắn gọn, rõ hành động, xưng em gọi người dùng là sếp...)"
+        )
+        self.assistant_persona_input.setMinimumHeight(88)
+        profile_layout.addWidget(self.assistant_persona_input)
+
+        self.assistant_hint = QLabel("")
+        self.assistant_hint.setStyleSheet("font-size: 12px; color: #64748B;")
+        self.assistant_hint.setWordWrap(True)
+        profile_layout.addWidget(self.assistant_hint)
+
+        layout.addWidget(profile_card)
 
         # ── Toolbar ──
         toolbar = QHBoxLayout()
@@ -180,6 +243,38 @@ class MemoryPage(QWidget):
         """Tải dữ liệu quy tắc từ DB."""
         self._rules_data = self.memory_mgr.get_all_rules()
         self._populate_table()
+
+    def _load_profile(self):
+        profile = self.assistant_mem_mgr.get_profile()
+        if self.assistant_name_input is not None:
+            self.assistant_name_input.setText(str(profile.get("display_name") or ""))
+        if self.assistant_persona_input is not None:
+            self.assistant_persona_input.setPlainText(str(profile.get("persona_prompt") or ""))
+        if self.assistant_hint is not None:
+            self.assistant_hint.setText(
+                "Đã nạp hồ sơ trợ lý từ SQLite. Nội dung sẽ được inject vào prompt Telegram/Codex."
+            )
+
+    def _save_profile(self):
+        display_name = (self.assistant_name_input.text() if self.assistant_name_input else "").strip()
+        persona_prompt = (
+            self.assistant_persona_input.toPlainText() if self.assistant_persona_input else ""
+        ).strip()
+        ok = self.assistant_mem_mgr.update_profile(
+            display_name=display_name,
+            persona_prompt=persona_prompt,
+            preferences=None,
+        )
+        if ok:
+            if self.assistant_hint is not None:
+                self.assistant_hint.setStyleSheet("font-size: 12px; color: #10B981;")
+                self.assistant_hint.setText("Đã lưu Assistant Profile. Áp dụng cho các tin nhắn Telegram mới.")
+            return
+
+        if self.assistant_hint is not None:
+            self.assistant_hint.setStyleSheet("font-size: 12px; color: #EF4444;")
+            self.assistant_hint.setText("Lưu Assistant Profile thất bại.")
+        QMessageBox.warning(self, "Lỗi", "Không thể lưu Assistant Profile vào database.")
 
     def _populate_table(self):
         self.table.setRowCount(len(self._rules_data))
