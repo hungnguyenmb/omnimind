@@ -1,13 +1,13 @@
 """
 OmniMind - Tab 2: Auth & Core Settings Page
-Form Token Telegram, Workspace Path, Sandbox Permission, Auto-start.
+Form Token Telegram, Workspace Path, Codex Config, Auto-start.
 """
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QLineEdit, QComboBox, QFrame, QGraphicsDropShadowEffect,
     QCheckBox, QFileDialog, QScrollArea, QMessageBox, QProgressBar
 )
-from PyQt5.QtCore import Qt, QThread, pyqtSignal
+from PyQt5.QtCore import Qt, QSize, QThread, pyqtSignal
 from PyQt5.QtGui import QColor
 from ui.icons import Icons
 from engine.config_manager import ConfigManager
@@ -47,39 +47,56 @@ class RuntimeInstallWorker(QThread):
     progress = pyqtSignal(int, str)
     finished = pyqtSignal(dict)
 
-    def __init__(self, env_manager, component: str, install_policy: dict, parent=None):
+    def __init__(self, env_manager, components, install_policy: dict, parent=None):
         super().__init__(parent)
         self.env_manager = env_manager
-        self.component = component
+        if isinstance(components, (list, tuple, set)):
+            self.components = [str(c).strip() for c in components if str(c).strip()]
+        else:
+            comp = str(components).strip()
+            self.components = [comp] if comp else []
         self.install_policy = install_policy or {}
 
     def run(self):
         try:
-            self.progress.emit(5, f"Đang chuẩn bị cài đặt {self.component}...")
+            if not self.components:
+                self.finished.emit({
+                    "success": True,
+                    "components": [],
+                    "status": self.env_manager.check_prerequisites(),
+                    "message": "Không có môi trường cần cài đặt.",
+                })
+                return
+
+            target = ", ".join(self.components)
+            self.progress.emit(5, f"Đang chuẩn bị cài đặt: {target}...")
             ok = self.env_manager.install_missing_env(
-                [self.component],
+                self.components,
                 self.install_policy,
                 progress_callback=lambda pct, msg: self.progress.emit(pct, msg),
             )
             recheck = self.env_manager.check_prerequisites()
-            status = recheck.get(self.component)
-            success = bool(ok and status == "OK")
-            if not success and self.component == "npm":
-                # npm đi kèm Node ở nhiều nền tảng
-                success = bool(ok and recheck.get("node") == "OK" and recheck.get("npm") == "OK")
+            missing_after = [comp for comp in self.components if recheck.get(comp) == "MISSING"]
+            success = bool(ok and not missing_after)
 
             self.finished.emit({
                 "success": success,
-                "component": self.component,
+                "components": list(self.components),
                 "status": recheck,
-                "message": "Cài đặt thành công." if success else f"Không thể cài {self.component}.",
+                "missing_after": missing_after,
+                "message": (
+                    "Cài đặt môi trường thành công."
+                    if success
+                    else f"Không thể cài đầy đủ: {', '.join(missing_after)}."
+                ),
             })
         except Exception as e:
             logger.exception("Runtime install worker failed")
+            target = ", ".join(self.components) if self.components else "runtime"
             self.finished.emit({
                 "success": False,
-                "component": self.component,
-                "message": f"Lỗi cài đặt {self.component}: {str(e)[:80]}",
+                "components": list(self.components),
+                "message": f"Lỗi cài đặt {target}: {str(e)[:80]}",
             })
 
 
@@ -94,18 +111,21 @@ class CodexInstallWorker(QThread):
 
     def run(self):
         try:
-            platform_key = self.env_manager.get_platform_key()
-            platform_data = self.release_manifest.get("platforms", {}).get(platform_key, {})
-            dl_url = (platform_data.get("url") or "").strip()
+            release_data = self.env_manager.resolve_codex_download_info(self.release_manifest)
+            dl_url = (release_data.get("url") or "").strip()
             if not dl_url:
                 self.finished.emit({
                     "success": False,
-                    "message": f"HĐH không được hỗ trợ Codex ({platform_key}).",
+                    "message": (
+                        "HĐH/kiến trúc máy chưa có gói Codex phù hợp "
+                        f"({release_data.get('platform', 'unknown')}/{release_data.get('arch', 'unknown')})."
+                    ),
                 })
                 return
 
             ok = self.env_manager.download_and_install_codex(
                 dl_url,
+                expected_checksum=(release_data.get("checksum") or ""),
                 progress_callback=lambda pct, msg: self.progress.emit(pct, msg),
             )
             self.finished.emit({
@@ -128,6 +148,8 @@ class AuthPage(QWidget):
         self._codex_installing = False
         self._runtime_installer_ready = False
         self._runtime_installer_info = {}
+        self._auto_install_codex_after_runtime = False
+        self._pending_codex_manifest = None
         try:
             self.env_manager = EnvironmentManager()
         except Exception as e:
@@ -165,7 +187,7 @@ class AuthPage(QWidget):
         h_layout.setSpacing(4)
         title = QLabel("Xác Thực & Cấu Hình")
         title.setObjectName("PageTitle")
-        desc = QLabel("Cấu hình kết nối Telegram Bot, thư mục Workspace, và quyền hạn Sandbox cho AI.")
+        desc = QLabel("Cấu hình Telegram Bot, Workspace, xác thực Codex CLI và các tuỳ chọn hệ thống.")
         desc.setObjectName("PageDesc")
         desc.setWordWrap(True)
         h_layout.addWidget(title)
@@ -331,26 +353,94 @@ class AuthPage(QWidget):
 
         layout.addWidget(codex_card)
 
+        # ── Codex CLI Config Card ──
+        codex_cfg_card = self._create_card("Cấu hình Codex CLI")
+        codex_cfg_layout = codex_cfg_card.layout()
+
+        codex_cfg_layout.addWidget(self._create_field_label("Model"))
+        self.codex_model_combo = QComboBox()
+        self.codex_model_combo.setObjectName("FormCombo")
+        self.codex_model_combo.setEditable(False)
+        self.codex_model_combo.setInsertPolicy(QComboBox.NoInsert)
+        self.codex_model_combo.setMaxVisibleItems(8)
+        self.codex_model_combo.addItem("gpt-5.3-codex", "gpt-5.3-codex")
+        self.codex_model_combo.addItem("gpt-5-codex", "gpt-5-codex")
+        self.codex_model_combo.addItem("gpt-5.2-codex", "gpt-5.2-codex")
+        self.codex_model_combo.addItem("o4-mini", "o4-mini")
+        self.codex_model_combo.setFixedHeight(44)
+        codex_cfg_layout.addWidget(self.codex_model_combo)
+
+        codex_cfg_layout.addSpacing(4)
+        codex_cfg_layout.addWidget(self._create_field_label("Sandbox mode"))
+        self.codex_sandbox_combo = QComboBox()
+        self.codex_sandbox_combo.setObjectName("FormCombo")
+        self.codex_sandbox_combo.setIconSize(QSize(16, 16))
+        self.codex_sandbox_combo.addItem(
+            Icons.lock("#0EA5E9", 16),
+            "read-only (chỉ đọc, an toàn cao)",
+            "read-only",
+        )
+        self.codex_sandbox_combo.addItem(
+            Icons.edit("#3B82F6", 16),
+            "workspace-write (đọc/ghi trong workspace)",
+            "workspace-write",
+        )
+        self.codex_sandbox_combo.addItem(
+            Icons.alert("#EF4444", 16),
+            "danger-full-access (toàn quyền, rủi ro cao)",
+            "danger-full-access",
+        )
+        self.codex_sandbox_combo.setFixedHeight(44)
+        self.codex_sandbox_combo.currentIndexChanged.connect(self._update_codex_policy_warning)
+        codex_cfg_layout.addWidget(self.codex_sandbox_combo)
+
+        codex_cfg_layout.addSpacing(4)
+        codex_cfg_layout.addWidget(self._create_field_label("Approval policy"))
+        self.codex_approval_combo = QComboBox()
+        self.codex_approval_combo.setObjectName("FormCombo")
+        self.codex_approval_combo.setIconSize(QSize(16, 16))
+        self.codex_approval_combo.addItem(
+            Icons.shield("#64748B", 16),
+            "untrusted (lệnh lạ phải xin phép)",
+            "untrusted",
+        )
+        self.codex_approval_combo.addItem(
+            Icons.check_circle("#10B981", 16),
+            "on-request (đề xuất khi cần)",
+            "on-request",
+        )
+        self.codex_approval_combo.addItem(
+            Icons.alert("#DC2626", 16),
+            "never (không hỏi lại)",
+            "never",
+        )
+        self.codex_approval_combo.addItem(
+            Icons.refresh("#F59E0B", 16),
+            "on-failure (legacy)",
+            "on-failure",
+        )
+        self.codex_approval_combo.setFixedHeight(44)
+        self.codex_approval_combo.currentIndexChanged.connect(self._update_codex_policy_warning)
+        codex_cfg_layout.addWidget(self.codex_approval_combo)
+
+        self.codex_policy_warning = QLabel("")
+        self.codex_policy_warning.setStyleSheet("font-size: 12px; color: #EF4444;")
+        self.codex_policy_warning.setWordWrap(True)
+        codex_cfg_layout.addWidget(self.codex_policy_warning)
+
+        self.codex_cfg_hint = QLabel("Cấu hình sẽ lưu vào ~/.codex/config.toml và SQLite cục bộ.")
+        self.codex_cfg_hint.setStyleSheet("font-size: 12px; color: #64748B;")
+        self.codex_cfg_hint.setWordWrap(True)
+        codex_cfg_layout.addWidget(self.codex_cfg_hint)
+
+        layout.addWidget(codex_cfg_card)
+
         # Auto-check khi khởi động
         self._check_codex_installed()
 
         # ── Security & Preferences Card ──
         sec_card = self._create_card("🛡  Bảo mật & Tuỳ chọn")
         sec_layout = sec_card.layout()
-
-        # Sandbox Permission
-        sec_layout.addWidget(self._create_field_label("Quyền Sandbox"))
-        self.sandbox_combo = QComboBox()
-        self.sandbox_combo.setObjectName("FormCombo")
-        self.sandbox_combo.addItems([
-            "🔒 Read-only (Chỉ đọc, an toàn tuyệt đối)",
-            "⚡ Safe (Đọc + Ghi file an toàn)",
-            "🔓 Full Danger (Toàn quyền, không hạn chế)"
-        ])
-        self.sandbox_combo.setFixedHeight(44)
-        sec_layout.addWidget(self.sandbox_combo)
-
-        sec_layout.addSpacing(4)
 
         # Auto-start
         self.auto_start_check = QCheckBox("  Tự khởi động cùng hệ điều hành (System Startup)")
@@ -398,6 +488,79 @@ class AuthPage(QWidget):
 
         scroll.setWidget(scroll_content)
         wrapper.addWidget(scroll)
+
+    def _update_codex_policy_warning(self):
+        sandbox_mode = self.codex_sandbox_combo.currentData() or "workspace-write"
+        approval_policy = self.codex_approval_combo.currentData() or "on-request"
+        if sandbox_mode == "danger-full-access" or approval_policy == "never":
+            self.codex_policy_warning.setText(
+                "Cảnh báo: cấu hình hiện tại cho quyền rất cao. Chỉ dùng khi bạn kiểm soát hoàn toàn lệnh chạy."
+            )
+        else:
+            self.codex_policy_warning.setText("")
+
+    def _set_codex_combo_value(self, combo: QComboBox, value: str):
+        idx = combo.findData(value)
+        if idx >= 0:
+            combo.setCurrentIndex(idx)
+            return
+        text = str(value or "").strip()
+        if not text:
+            return
+        combo.addItem(text, text)
+        combo.setCurrentIndex(combo.count() - 1)
+
+    @staticmethod
+    def _legacy_sandbox_label(mode: str) -> str:
+        mapping = {
+            "read-only": "🔒 Read-only (Chỉ đọc, an toàn tuyệt đối)",
+            "workspace-write": "⚡ Safe (Đọc + Ghi file an toàn)",
+            "danger-full-access": "🔓 Full Danger (Toàn quyền, không hạn chế)",
+        }
+        return mapping.get(mode, mapping["workspace-write"])
+
+    def _load_codex_cli_preferences(self):
+        prefs = {
+            "model": ConfigManager.get_codex_model(),
+            "sandbox_mode": ConfigManager.get_sandbox_mode(),
+            "approval_policy": ConfigManager.get_codex_approval_policy(),
+            "source": "sqlite",
+            "config_path": "",
+        }
+        if self.env_manager:
+            try:
+                prefs = self.env_manager.read_codex_cli_preferences()
+            except Exception as e:
+                logger.warning(f"Cannot load codex config from file: {e}")
+
+        model = str(prefs.get("model", "gpt-5.3-codex")).strip() or "gpt-5.3-codex"
+        sandbox_mode = str(prefs.get("sandbox_mode", "workspace-write")).strip()
+        approval_policy = str(prefs.get("approval_policy", "on-request")).strip()
+
+        if sandbox_mode not in {"read-only", "workspace-write", "danger-full-access"}:
+            sandbox_mode = "workspace-write"
+        if approval_policy not in {"untrusted", "on-request", "never", "on-failure"}:
+            approval_policy = "on-request"
+
+        self._set_codex_combo_value(self.codex_model_combo, model)
+        self._set_codex_combo_value(self.codex_sandbox_combo, sandbox_mode)
+        self._set_codex_combo_value(self.codex_approval_combo, approval_policy)
+        self._update_codex_policy_warning()
+
+        # Đồng bộ SQLite để các module khác luôn đọc được cấu hình mới nhất.
+        ConfigManager.set_codex_model(model)
+        ConfigManager.set_sandbox_mode(sandbox_mode)
+        ConfigManager.set_codex_approval_policy(approval_policy)
+        ConfigManager.set("sandbox_permission", self._legacy_sandbox_label(sandbox_mode))
+
+        src = prefs.get("source", "sqlite")
+        cfg_path = prefs.get("config_path", "")
+        if cfg_path:
+            self.codex_cfg_hint.setText(
+                f"Cấu hình hiện tại đọc từ {src}: {cfg_path}. Khi lưu sẽ đồng bộ cả SQLite."
+            )
+        else:
+            self.codex_cfg_hint.setText("Cấu hình hiện tại đọc từ SQLite. Khi lưu sẽ ghi cả config.toml.")
 
     def _create_card(self, title_text):
         card = QFrame()
@@ -558,20 +721,50 @@ class AuthPage(QWidget):
 
         release_manifest = self.env_manager.fetch_codex_release_manifest()
         install_policy = release_manifest.get("install_policy", {})
+        self._auto_install_codex_after_runtime = False
+        self._pending_codex_manifest = None
+        self._start_runtime_install(
+            [component],
+            install_policy,
+            f"Đang cài đặt {friendly}...",
+            f"Khởi tạo cài đặt {friendly}...",
+        )
 
+    def _start_runtime_install(self, components: list, install_policy: dict, status_text: str, progress_text: str):
+        if not components:
+            return
         self._runtime_installing = True
         self.codex_download_btn.setEnabled(False)
         self.codex_verify_btn.setEnabled(False)
         self.codex_status_icon.setText("🟡")
-        self.codex_status_label.setText(f"Đang cài đặt {friendly}...")
+        self.codex_status_label.setText(status_text)
         self.codex_status_label.setStyleSheet("font-size: 14px; font-weight: 600; color: #3B82F6;")
-        self._set_progress(True, 5, f"Khởi tạo cài đặt {friendly}...")
+        self._set_progress(True, 5, progress_text)
         self._show_missing_runtime_actions(self._missing_runtime)
 
-        self._runtime_worker = RuntimeInstallWorker(self.env_manager, component, install_policy, self)
+        self._runtime_worker = RuntimeInstallWorker(self.env_manager, components, install_policy, self)
         self._runtime_worker.progress.connect(self._on_runtime_progress)
         self._runtime_worker.finished.connect(self._on_runtime_finished)
         self._runtime_worker.start()
+
+    def _start_codex_install(self, release_manifest: dict, runtime_missing: list):
+        if not self.env_manager or self._codex_installing:
+            return
+        self._codex_installing = True
+        self.codex_download_btn.setEnabled(False)
+        self.codex_download_btn.setText("  Đang tải...")
+        self.codex_verify_btn.setEnabled(False)
+        self.codex_status_icon.setText("🟡")
+        self.codex_status_label.setText("Đang tải và cài đặt Codex CLI...")
+        self.codex_status_label.setStyleSheet("font-size: 14px; font-weight: 600; color: #3B82F6;")
+        self.codex_hint.setText("Đang xử lý. Bạn có thể theo dõi tiến trình bên dưới.")
+        self._set_progress(True, 5, "Khởi tạo cài đặt Codex...")
+        self._show_missing_runtime_actions(runtime_missing)
+
+        self._codex_install_worker = CodexInstallWorker(self.env_manager, release_manifest, self)
+        self._codex_install_worker.progress.connect(self._on_codex_install_progress)
+        self._codex_install_worker.finished.connect(self._on_codex_install_finished)
+        self._codex_install_worker.start()
 
     def _on_runtime_progress(self, percent: int, message: str):
         self._set_progress(True, percent, message)
@@ -590,12 +783,26 @@ class AuthPage(QWidget):
             self.codex_status_icon.setText("🟡")
             self.codex_status_label.setText(result.get("message", "Cài đặt môi trường thành công."))
             self.codex_status_label.setStyleSheet("font-size: 14px; font-weight: 600; color: #F59E0B;")
-            self._set_progress(True, 100, "Đã hoàn tất. Bạn có thể cài thành phần tiếp theo hoặc tải Codex.")
+            if self._auto_install_codex_after_runtime and not missing_runtime:
+                self._auto_install_codex_after_runtime = False
+                codex_ready = env_status.get("codex_ready", env_status.get("codex") == "OK")
+                if codex_ready:
+                    self._set_progress(True, 100, "Runtime đã đầy đủ. Codex đã được cài.")
+                    self._pending_codex_manifest = None
+                    self._check_codex_installed()
+                    return
+                manifest = self._pending_codex_manifest or self.env_manager.fetch_codex_release_manifest()
+                self._pending_codex_manifest = None
+                self._start_codex_install(manifest, missing_runtime)
+                return
+            self._set_progress(True, 100, "Đã hoàn tất. Bạn có thể tiếp tục tải Codex.")
         else:
             self.codex_status_icon.setText("🔴")
             self.codex_status_label.setText(result.get("message", "Cài đặt môi trường thất bại."))
             self.codex_status_label.setStyleSheet("font-size: 14px; font-weight: 600; color: #EF4444;")
             self._set_progress(True, 100, "Tiến trình dừng do lỗi. Vui lòng thử lại.")
+            self._auto_install_codex_after_runtime = False
+            self._pending_codex_manifest = None
 
         self._check_codex_installed()
 
@@ -614,7 +821,6 @@ class AuthPage(QWidget):
         token = ConfigManager.get("telegram_token", "")
         chat_id = ConfigManager.get("telegram_chat_id", "")
         workspace = ConfigManager.get("workspace_path", "")
-        sandbox = ConfigManager.get("sandbox_permission", "🔒 Read-only (Chỉ đọc, an toàn tuyệt đối)")
         
         # Load Checkboxes
         auto_start = ConfigManager.get("auto_start", "False") == "True"
@@ -634,10 +840,7 @@ class AuthPage(QWidget):
         self.token_input.setText(token)
         self.user_id_input.setText(chat_id)
         self.workspace_input.setText(workspace)
-
-        idx = self.sandbox_combo.findText(sandbox)
-        if idx >= 0:
-            self.sandbox_combo.setCurrentIndex(idx)
+        self._load_codex_cli_preferences()
             
         self.auto_start_check.setChecked(auto_start)
         # Tạm tắt signal để không trigger việc yêu cầu quyền khi vừa mở UI
@@ -663,8 +866,10 @@ class AuthPage(QWidget):
         token = self.token_input.text().strip()
         chat_id = self.user_id_input.text().strip()
         workspace = self.workspace_input.text().strip()
-        sandbox = self.sandbox_combo.currentText()
-        
+        model = self.codex_model_combo.currentText().strip() or "gpt-5.3-codex"
+        sandbox_mode = self.codex_sandbox_combo.currentData() or "workspace-write"
+        approval_policy = self.codex_approval_combo.currentData() or "on-request"
+
         auto_start = str(self.auto_start_check.isChecked())
         perm_acc = str(self.perm_accessibility.isChecked())
         perm_scr = str(self.perm_screenshot.isChecked())
@@ -673,12 +878,36 @@ class AuthPage(QWidget):
         ConfigManager.set("telegram_token", token)
         ConfigManager.set("telegram_chat_id", chat_id)
         ConfigManager.set("workspace_path", workspace)
-        ConfigManager.set("sandbox_permission", sandbox)
+        ConfigManager.set_codex_model(model)
+        ConfigManager.set_sandbox_mode(sandbox_mode)
+        ConfigManager.set_codex_approval_policy(approval_policy)
+        # Legacy key để tránh ảnh hưởng các phiên bản runtime cũ.
+        ConfigManager.set("sandbox_permission", self._legacy_sandbox_label(sandbox_mode))
         ConfigManager.set("auto_start", auto_start)
         ConfigManager.set("perm_accessibility", perm_acc)
         ConfigManager.set("perm_screenshot", perm_scr)
         ConfigManager.set("perm_camera", perm_cam)
-        
+
+        if self.env_manager:
+            write_result = self.env_manager.write_codex_cli_preferences(
+                model=model,
+                sandbox_mode=sandbox_mode,
+                approval_policy=approval_policy,
+            )
+            if write_result.get("success"):
+                self.codex_cfg_hint.setStyleSheet("font-size: 12px; color: #10B981;")
+                self.codex_cfg_hint.setText(
+                    f"Đã lưu cấu hình Codex CLI: {write_result.get('config_path', '~/.codex/config.toml')}"
+                )
+            else:
+                self.codex_cfg_hint.setStyleSheet("font-size: 12px; color: #EF4444;")
+                self.codex_cfg_hint.setText(write_result.get("message", "Không thể ghi config.toml"))
+                QMessageBox.warning(
+                    self,
+                    "Lưu cấu hình Codex",
+                    write_result.get("message", "Không thể ghi ~/.codex/config.toml"),
+                )
+
         # Trigger hệ thống Auto Start
         self._toggle_auto_start(self.auto_start_check.isChecked())
 
@@ -767,8 +996,8 @@ class AuthPage(QWidget):
 
             if runtime_missing:
                 hint_txt = (
-                    "Nhấn \"Tải bộ não AI\" để kiểm tra môi trường và hiện danh sách cài đặt từng thành phần.\n"
-                    "Bạn có thể chọn cài Python/Node/npm theo thứ tự mong muốn."
+                    "Nhấn \"Tải bộ não AI\" để hệ thống tự động cài runtime còn thiếu (Python/Node/npm),"
+                    " sau đó tải Codex CLI."
                 )
             else:
                 hint_txt = (
@@ -780,7 +1009,7 @@ class AuthPage(QWidget):
             self._set_progress(False)
 
     def _download_codex(self):
-        """Kiểm tra runtime; nếu đủ thì tải Codex, nếu thiếu thì hiện list cài từng mục."""
+        """Ưu tiên cài Codex trước; runtime thiếu được coi là thành phần bổ sung."""
         if not self.env_manager or self._runtime_installing or self._codex_installing:
             return
 
@@ -796,27 +1025,22 @@ class AuthPage(QWidget):
 
         if runtime_missing:
             missing_text = ", ".join(self._runtime_display_name(k) for k in runtime_missing)
-            self.codex_status_icon.setText("🟡")
-            self.codex_status_label.setText("Vui lòng cài runtime trước khi tải Codex")
-            self.codex_status_label.setStyleSheet("font-size: 14px; font-weight: 600; color: #F59E0B;")
-            if self._runtime_installer_ready:
-                self.codex_hint.setText(
-                    f"Đang thiếu: {missing_text}. Nhấn nút \"Cài đặt\" ở từng mục phía dưới theo thứ tự bạn muốn."
-                )
-            else:
-                installer = self._runtime_installer_info.get("display_name", "installer")
-                hint = self._runtime_installer_info.get("manual_hint", "Cài thủ công Python/Node/npm.")
-                self.codex_hint.setText(
-                    f"Đang thiếu: {missing_text}. Auto-install chưa khả dụng vì thiếu {installer}. {hint}"
-                )
-            self._set_progress(False)
-            return
+            self.codex_hint.setText(
+                f"Đang thiếu runtime: {missing_text}. Codex vẫn sẽ được cài trước; runtime có thể cài bổ sung sau."
+            )
 
         if codex_ready:
             self.codex_status_icon.setText("🟢")
             self.codex_status_label.setText("Codex đã được cài đặt")
             self.codex_status_label.setStyleSheet("font-size: 14px; font-weight: 600; color: #10B981;")
-            self.codex_hint.setText("Codex CLI đã có sẵn. Bạn có thể nhấn xác thực tài khoản.")
+            if runtime_missing:
+                missing_text = ", ".join(self._runtime_display_name(k) for k in runtime_missing)
+                self.codex_hint.setText(
+                    f"Codex CLI đã có sẵn. Runtime bổ sung còn thiếu: {missing_text}. "
+                    "Bạn có thể cài sau bằng các nút bên dưới."
+                )
+            else:
+                self.codex_hint.setText("Codex CLI đã có sẵn. Bạn có thể nhấn xác thực tài khoản.")
             self.codex_download_btn.setVisible(False)
             self.codex_verify_btn.setVisible(True)
             self._set_progress(False)
@@ -826,6 +1050,7 @@ class AuthPage(QWidget):
             "Tải bộ não AI (Codex CLI)",
             (
                 "Ứng dụng sẽ tải và cài Codex CLI vào máy.\n\n"
+                "Codex CLI được ưu tiên cài trước. Runtime bổ sung sẽ cài sau nếu cần.\n"
                 "Tiến trình có thể yêu cầu quyền hệ thống trên một số môi trường.\n"
                 "Nhấn OK để tiếp tục hoặc Cancel để dừng."
             ),
@@ -834,21 +1059,7 @@ class AuthPage(QWidget):
             return
 
         release_manifest = self.env_manager.fetch_codex_release_manifest()
-        self._codex_installing = True
-        self.codex_download_btn.setEnabled(False)
-        self.codex_download_btn.setText("  Đang tải...")
-        self.codex_verify_btn.setEnabled(False)
-        self.codex_status_icon.setText("🟡")
-        self.codex_status_label.setText("Đang tải và cài đặt Codex CLI...")
-        self.codex_status_label.setStyleSheet("font-size: 14px; font-weight: 600; color: #3B82F6;")
-        self.codex_hint.setText("Đang xử lý. Bạn có thể theo dõi tiến trình bên dưới.")
-        self._set_progress(True, 5, "Khởi tạo cài đặt Codex...")
-        self._show_missing_runtime_actions(runtime_missing)
-
-        self._codex_install_worker = CodexInstallWorker(self.env_manager, release_manifest, self)
-        self._codex_install_worker.progress.connect(self._on_codex_install_progress)
-        self._codex_install_worker.finished.connect(self._on_codex_install_finished)
-        self._codex_install_worker.start()
+        self._start_codex_install(release_manifest, runtime_missing)
 
     def _on_codex_install_progress(self, percent: int, message: str):
         self._set_progress(True, percent, message)
@@ -863,6 +1074,13 @@ class AuthPage(QWidget):
 
     def _on_download_complete(self):
         """Callback sau khi tải Codex xong."""
+        try:
+            env_status = self.env_manager.check_prerequisites() if self.env_manager else {}
+        except Exception:
+            env_status = {}
+        runtime_missing = [k for k in ("python", "node", "npm") if env_status.get(k) == "MISSING"]
+        self._show_missing_runtime_actions(runtime_missing)
+
         self._set_progress(True, 100, "Cài đặt Codex hoàn tất.")
         self.codex_download_btn.setEnabled(True)
         self.codex_download_btn.setText("  Tải bộ não AI")
@@ -872,7 +1090,14 @@ class AuthPage(QWidget):
         self.codex_status_icon.setText("🟡")
         self.codex_status_label.setText("Đã cài đặt · Chưa xác thực")
         self.codex_status_label.setStyleSheet("font-size: 14px; font-weight: 600; color: #F59E0B;")
-        self.codex_hint.setText("Cài đặt thành công! Nhấn xác thực để đăng nhập tài khoản Codex.")
+        if runtime_missing:
+            missing_text = ", ".join(self._runtime_display_name(k) for k in runtime_missing)
+            self.codex_hint.setText(
+                f"Cài đặt Codex thành công. Runtime bổ sung còn thiếu: {missing_text}. "
+                "Bạn có thể cài sau bằng các nút bên dưới."
+            )
+        else:
+            self.codex_hint.setText("Cài đặt thành công! Nhấn xác thực để đăng nhập tài khoản Codex.")
 
     def _on_download_failed(self, msg: str):
         """Reset UI đúng trạng thái khi tải/cài Codex lỗi."""

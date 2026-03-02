@@ -84,13 +84,56 @@ class ConfigManager:
         cls.set("CODEX_HOME", normalized)
 
     @classmethod
+    def get_codex_model(cls) -> str:
+        val = cls.get("codex_model", "").strip()
+        return val or "gpt-5.3-codex"
+
+    @classmethod
+    def set_codex_model(cls, model: str):
+        cls.set("codex_model", str(model or "").strip())
+
+    @classmethod
+    def get_codex_approval_policy(cls) -> str:
+        val = cls.get("codex_approval_policy", "").strip()
+        if val in {"untrusted", "on-request", "never", "on-failure"}:
+            return val
+        legacy = cls.get("approval_policy", "").strip()
+        if legacy in {"untrusted", "on-request", "never", "on-failure"}:
+            return legacy
+        return "on-request"
+
+    @classmethod
+    def set_codex_approval_policy(cls, policy: str):
+        normalized = str(policy or "").strip()
+        if normalized not in {"untrusted", "on-request", "never", "on-failure"}:
+            normalized = "on-request"
+        cls.set("codex_approval_policy", normalized)
+        cls.set("approval_policy", normalized)
+
+    @classmethod
     def get_sandbox_mode(cls) -> str:
         """
         Chuẩn hóa lựa chọn Sandbox UI thành mode dùng cho runtime/env.
         """
+        new_val = cls.get("codex_sandbox_mode", "").strip()
+        if new_val in {"read-only", "workspace-write", "danger-full-access"}:
+            return new_val
+
+        legacy_mode = cls.get("sandbox_mode", "").strip()
+        if legacy_mode in {"read-only", "workspace-write", "danger-full-access"}:
+            return legacy_mode
+
         val = cls.get("sandbox_permission", "").strip()
         if "read-only" in val.lower() or "chỉ đọc" in val.lower():
             return "read-only"
         if "full" in val.lower() or "danger" in val.lower() or "toàn quyền" in val.lower():
             return "danger-full-access"
         return "workspace-write"
+
+    @classmethod
+    def set_sandbox_mode(cls, mode: str):
+        normalized = str(mode or "").strip()
+        if normalized not in {"read-only", "workspace-write", "danger-full-access"}:
+            normalized = "workspace-write"
+        cls.set("codex_sandbox_mode", normalized)
+        cls.set("sandbox_mode", normalized)

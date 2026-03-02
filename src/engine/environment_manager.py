@@ -4,6 +4,8 @@ import platform
 import subprocess
 import logging
 import re
+import json
+import hashlib
 import urllib.request
 import zipfile
 import tarfile
@@ -18,6 +20,20 @@ DEFAULT_API_BASE_URL = os.environ.get("OMNIMIND_API_URL", "http://localhost:8050
 DEFAULT_RELEASE_MANIFEST = {
     "version": "1.5.0",
     "prerequisites": {"python": ">=3.9", "node": ">=18.0"},
+    "matrix": {
+        "darwin": {
+            "arm64": {
+                "url": "https://github.com/Antigravity-AI/codex-cli/releases/download/v1.5.0/codex-macos-arm64.zip",
+                "method": "zip_extract",
+            }
+        },
+        "win32": {
+            "x64": {
+                "url": "https://github.com/Antigravity-AI/codex-cli/releases/download/v1.5.0/codex-windows-x64.zip",
+                "method": "zip_extract",
+            }
+        },
+    },
     "platforms": {
         "darwin": {
             "url": "https://github.com/Antigravity-AI/codex-cli/releases/download/v1.5.0/codex-macos-arm64.zip",
@@ -67,10 +83,175 @@ class EnvironmentManager:
         env = os.environ.copy()
         env["CODEX_HOME"] = str(self.codex_home)
         sandbox_mode = ConfigManager.get_sandbox_mode()
+        approval_policy = ConfigManager.get_codex_approval_policy()
+        model = ConfigManager.get_codex_model()
         # Dùng biến env để các lệnh Codex/bot engine downstream có thể đọc cùng 1 cấu hình sandbox.
         env["OMNIMIND_SANDBOX_MODE"] = sandbox_mode
         env["CODEX_SANDBOX_MODE"] = sandbox_mode
+        env["OMNIMIND_APPROVAL_POLICY"] = approval_policy
+        env["CODEX_APPROVAL_POLICY"] = approval_policy
+        env["OMNIMIND_CODEX_MODEL"] = model
         return env
+
+    def get_codex_config_path(self) -> Path:
+        return self.codex_home / "config.toml"
+
+    @staticmethod
+    def _unquote_toml_string(raw: str) -> str:
+        value = (raw or "").strip()
+        if len(value) >= 2 and value[0] == '"' and value[-1] == '"':
+            try:
+                return json.loads(value)
+            except Exception:
+                return value[1:-1]
+        return value
+
+    @classmethod
+    def _parse_root_toml_values(cls, text: str, keys: set[str]) -> dict:
+        out = {}
+        in_table = False
+        for line in (text or "").splitlines():
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#"):
+                continue
+            if stripped.startswith("[") and stripped.endswith("]"):
+                in_table = True
+                continue
+            if in_table:
+                continue
+            if "=" not in stripped:
+                continue
+            key_part, value_part = stripped.split("=", 1)
+            key = key_part.strip()
+            if key not in keys:
+                continue
+            value_raw = value_part.split("#", 1)[0].strip()
+            out[key] = cls._unquote_toml_string(value_raw)
+        return out
+
+    @staticmethod
+    def _escape_toml_string(value: str) -> str:
+        return str(value or "").replace("\\", "\\\\").replace('"', '\\"')
+
+    @classmethod
+    def _upsert_root_toml_values(cls, text: str, updates: dict) -> str:
+        lines = (text or "").splitlines()
+        first_table_idx = next(
+            (i for i, line in enumerate(lines) if line.strip().startswith("[") and line.strip().endswith("]")),
+            len(lines),
+        )
+        root_lines = lines[:first_table_idx]
+        table_lines = lines[first_table_idx:]
+
+        normalized_keys = set(updates.keys())
+        filtered_root = []
+        for line in root_lines:
+            stripped = line.strip()
+            if not stripped:
+                filtered_root.append(line)
+                continue
+            if "=" in stripped:
+                maybe_key = stripped.split("=", 1)[0].strip()
+                if maybe_key in normalized_keys:
+                    continue
+            filtered_root.append(line)
+
+        insert_lines = [f'{k} = "{cls._escape_toml_string(v)}"' for k, v in updates.items()]
+        anchor = 0
+        while anchor < len(filtered_root):
+            s = filtered_root[anchor].strip()
+            if not s or s.startswith("#"):
+                anchor += 1
+                continue
+            break
+
+        new_root = filtered_root[:anchor] + insert_lines + [""] + filtered_root[anchor:]
+        final_lines = new_root + table_lines
+        # Loại bớt dòng trống thừa cuối file.
+        while final_lines and not final_lines[-1].strip():
+            final_lines.pop()
+        return "\n".join(final_lines) + "\n"
+
+    def read_codex_cli_preferences(self) -> dict:
+        cfg = {
+            "model": ConfigManager.get_codex_model(),
+            "sandbox_mode": ConfigManager.get_sandbox_mode(),
+            "approval_policy": ConfigManager.get_codex_approval_policy(),
+            "config_path": str(self.get_codex_config_path()),
+            "source": "sqlite",
+        }
+        config_path = self.get_codex_config_path()
+        try:
+            if not config_path.exists():
+                return cfg
+
+            text = config_path.read_text(encoding="utf-8", errors="ignore")
+            parsed = self._parse_root_toml_values(text, {"model", "sandbox_mode", "approval_policy"})
+
+            model = str(parsed.get("model", "")).strip() or cfg["model"]
+            sandbox_mode = str(parsed.get("sandbox_mode", "")).strip()
+            approval_policy = str(parsed.get("approval_policy", "")).strip()
+
+            if sandbox_mode not in {"read-only", "workspace-write", "danger-full-access"}:
+                sandbox_mode = cfg["sandbox_mode"]
+            if approval_policy not in {"untrusted", "on-request", "never", "on-failure"}:
+                approval_policy = cfg["approval_policy"]
+
+            cfg.update(
+                {
+                    "model": model,
+                    "sandbox_mode": sandbox_mode,
+                    "approval_policy": approval_policy,
+                    "source": "config.toml",
+                }
+            )
+            return cfg
+        except Exception as e:
+            logger.warning(f"Cannot read Codex config.toml: {e}")
+            return cfg
+
+    def write_codex_cli_preferences(self, model: str, sandbox_mode: str, approval_policy: str) -> dict:
+        model = str(model or "").strip() or "gpt-5.3-codex"
+        sandbox_mode = str(sandbox_mode or "").strip()
+        approval_policy = str(approval_policy or "").strip()
+
+        if sandbox_mode not in {"read-only", "workspace-write", "danger-full-access"}:
+            return {"success": False, "message": f"Sandbox mode không hợp lệ: {sandbox_mode}"}
+        if approval_policy not in {"untrusted", "on-request", "never", "on-failure"}:
+            return {"success": False, "message": f"Approval policy không hợp lệ: {approval_policy}"}
+
+        config_path = self.get_codex_config_path()
+        try:
+            config_path.parent.mkdir(parents=True, exist_ok=True)
+            old_text = ""
+            if config_path.exists():
+                old_text = config_path.read_text(encoding="utf-8", errors="ignore")
+
+            new_text = self._upsert_root_toml_values(
+                old_text,
+                {
+                    "model": model,
+                    "sandbox_mode": sandbox_mode,
+                    "approval_policy": approval_policy,
+                },
+            )
+            config_path.write_text(new_text, encoding="utf-8")
+
+            ConfigManager.set_codex_model(model)
+            ConfigManager.set_sandbox_mode(sandbox_mode)
+            ConfigManager.set_codex_approval_policy(approval_policy)
+
+            return {
+                "success": True,
+                "message": "Đã lưu cấu hình Codex CLI.",
+                "config_path": str(config_path),
+                "model": model,
+                "sandbox_mode": sandbox_mode,
+                "approval_policy": approval_policy,
+            }
+        except Exception as e:
+            logger.exception("Cannot write Codex config.toml")
+            return {"success": False, "message": f"Không thể lưu config.toml: {str(e)[:120]}"}
 
     @staticmethod
     def _emit_progress(progress_callback: Optional[Callable[[int, str], None]], percent: int, message: str):
@@ -102,6 +283,85 @@ class EnvironmentManager:
         if self.os_name == "Linux":
             return "linux"
         return "unknown"
+
+    @staticmethod
+    def normalize_arch_key(raw_arch: str) -> str:
+        arch = str(raw_arch or "").strip().lower()
+        mapping = {
+            "x86_64": "x64",
+            "amd64": "x64",
+            "x64": "x64",
+            "i386": "x86",
+            "i686": "x86",
+            "aarch64": "arm64",
+            "arm64": "arm64",
+            "armv7l": "armv7",
+            "armv6l": "armv6",
+        }
+        return mapping.get(arch, arch or "unknown")
+
+    def get_arch_key(self) -> str:
+        return self.normalize_arch_key(platform.machine())
+
+    @staticmethod
+    def _normalize_release_entry(entry) -> dict:
+        if isinstance(entry, str):
+            url = entry.strip()
+            return {"url": url} if url else {}
+        if isinstance(entry, dict):
+            url = str(entry.get("url", "")).strip()
+            if not url:
+                return {}
+            out = {
+                "url": url,
+                "method": str(entry.get("method", "zip_extract")).strip() or "zip_extract",
+                "checksum": str(entry.get("checksum") or entry.get("sha256") or "").strip(),
+                "file_name": str(entry.get("file_name") or entry.get("filename") or "").strip(),
+            }
+            size_val = entry.get("size")
+            try:
+                out["size"] = int(size_val) if size_val is not None else None
+            except Exception:
+                out["size"] = None
+            return out
+        return {}
+
+    def resolve_codex_download_info(self, manifest: dict | None = None) -> dict:
+        data = manifest or {}
+        platform_key = self.get_platform_key()
+        arch_key = self.get_arch_key()
+
+        selected = self._normalize_release_entry(data.get("selected", {}))
+        if selected.get("url"):
+            selected["platform"] = str(data.get("platform", platform_key) or platform_key)
+            selected["arch"] = self.normalize_arch_key(str(data.get("arch", arch_key)))
+            return selected
+
+        matrix = data.get("matrix", {}) if isinstance(data.get("matrix"), dict) else {}
+        platform_map = matrix.get(platform_key, {}) if isinstance(matrix.get(platform_key), dict) else {}
+        exact = self._normalize_release_entry(platform_map.get(arch_key))
+        if exact.get("url"):
+            exact["platform"] = platform_key
+            exact["arch"] = arch_key
+            return exact
+
+        # Fallback theo thứ tự ưu tiên kiến trúc phổ biến.
+        fallback_arches = ["x64", "arm64", "x86"]
+        for fallback_arch in fallback_arches:
+            candidate = self._normalize_release_entry(platform_map.get(fallback_arch))
+            if candidate.get("url"):
+                candidate["platform"] = platform_key
+                candidate["arch"] = fallback_arch
+                return candidate
+
+        platforms = data.get("platforms", {}) if isinstance(data.get("platforms"), dict) else {}
+        legacy = self._normalize_release_entry(platforms.get(platform_key))
+        if legacy.get("url"):
+            legacy["platform"] = platform_key
+            legacy["arch"] = arch_key
+            return legacy
+
+        return {"url": "", "platform": platform_key, "arch": arch_key}
 
     def get_api_base_url(self) -> str:
         """
@@ -174,11 +434,27 @@ class EnvironmentManager:
 
         api_url = f"{self.get_api_base_url()}/api/v1/omnimind/codex/releases"
         try:
-            resp = requests.get(api_url, timeout=10)
+            resp = requests.get(
+                api_url,
+                params={"os_name": self.get_platform_key(), "arch": self.get_arch_key()},
+                timeout=10,
+            )
             if resp.status_code == 200:
                 remote = resp.json() or {}
                 merged = dict(DEFAULT_RELEASE_MANIFEST)
                 merged.update(remote)
+
+                # Merge matrix theo os + arch (nếu có).
+                base_matrix = json.loads(json.dumps(DEFAULT_RELEASE_MANIFEST.get("matrix", {})))
+                remote_matrix = remote.get("matrix", {})
+                if isinstance(remote_matrix, dict):
+                    for os_key, arch_map in remote_matrix.items():
+                        if not isinstance(arch_map, dict):
+                            continue
+                        merged_arch_map = dict(base_matrix.get(os_key, {}))
+                        merged_arch_map.update(arch_map)
+                        base_matrix[os_key] = merged_arch_map
+                merged["matrix"] = base_matrix
 
                 # Merge sâu cho 2 nhánh hay thay đổi.
                 merged_platforms = dict(DEFAULT_RELEASE_MANIFEST.get("platforms", {}))
@@ -376,6 +652,7 @@ class EnvironmentManager:
     def download_and_install_codex(
         self,
         download_url: str,
+        expected_checksum: str = "",
         progress_callback: Optional[Callable[[int, str], None]] = None,
     ) -> bool:
         """
@@ -403,6 +680,17 @@ class EnvironmentManager:
                     else:
                         pct = min(70, 5 + int(downloaded / (1024 * 1024)))
                     self._emit_progress(progress_callback, pct, "Đang tải Codex CLI...")
+
+            checksum = str(expected_checksum or "").strip().lower()
+            if checksum:
+                self._emit_progress(progress_callback, 72, "Đang kiểm tra checksum gói cài...")
+                digest = hashlib.sha256()
+                with open(archive_path, "rb") as f:
+                    for chunk in iter(lambda: f.read(1024 * 1024), b""):
+                        digest.update(chunk)
+                actual = digest.hexdigest().lower()
+                if actual != checksum:
+                    raise RuntimeError("Checksum gói Codex không khớp. Vui lòng thử lại.")
             
             logger.info("Extracting Codex CLI...")
             self._emit_progress(progress_callback, 75, "Đang giải nén Codex CLI...")
