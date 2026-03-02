@@ -796,57 +796,19 @@ class TelegramBotService:
     ) -> tuple[str, int | None]:
         draft_id = None
         try:
-            draft_id = transport.send_message(chat_id, "⏳ Codex đang suy nghĩ...")
+            draft_id = transport.send_message(chat_id, "🤔 AI đang suy nghĩ câu trả lời...")
         except Exception:
             draft_id = None
 
-        last_stream_sent = time.monotonic()
         output_chunks: list[str] = []
-        thinking_lines: list[str] = []
-        in_thinking = False
-
         def on_chunk(chunk: str):
-            nonlocal in_thinking, last_stream_sent
             output_chunks.append(chunk)
-            for line in str(chunk or "").splitlines():
-                stripped = line.strip()
-                low = stripped.lower()
-                if low == "thinking":
-                    in_thinking = True
-                    continue
-                if low in {"codex", "user"}:
-                    in_thinking = False
-                    continue
-                if not in_thinking:
-                    continue
-                if self._is_noise_line(stripped):
-                    continue
-                cleaned = stripped.strip("* ").strip()
-                if not cleaned:
-                    continue
-                if not self._is_meaningful_thinking_line(cleaned):
-                    continue
-                if thinking_lines and cleaned == thinking_lines[-1]:
-                    continue
-                thinking_lines.append(cleaned)
-                if len(thinking_lines) > 8:
-                    thinking_lines.pop(0)
 
-            if not draft_id:
-                return
-            now = time.monotonic()
-            if now - last_stream_sent < self.STREAM_THROTTLE_SEC:
-                return
-            if not thinking_lines:
-                return
-            draft_text = "🤔 Codex đang suy nghĩ...\n" + "\n".join(thinking_lines[-4:])
-            try:
-                transport.edit_message(chat_id, draft_id, draft_text)
-            except Exception:
-                pass
-            last_stream_sent = now
-
-        result = self._codex_bridge.stream_reply(prompt=prompt, on_chunk=on_chunk, timeout_sec=600)
+        result = self._codex_bridge.stream_reply(
+            prompt=prompt,
+            on_chunk=on_chunk,
+            timeout_sec=600,
+        )
         final_text = self._extract_final_response(result.get("output") or "")
         if not result.get("success"):
             msg = str(result.get("message") or "").strip()

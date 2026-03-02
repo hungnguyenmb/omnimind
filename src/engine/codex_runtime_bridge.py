@@ -7,7 +7,7 @@ import time
 import threading
 from pathlib import Path
 from queue import Empty, Queue
-from typing import Callable, Optional
+from typing import Callable, Optional, Any
 
 from engine.config_manager import ConfigManager
 from engine.environment_manager import EnvironmentManager
@@ -76,6 +76,15 @@ class CodexRuntimeBridge:
         return payload
 
     @staticmethod
+    def _emit_event(callback: Callable[[dict[str, Any]], None] | None, payload: dict[str, Any]):
+        if not callback:
+            return
+        try:
+            callback(payload)
+        except Exception as e:
+            logger.warning(f"Runtime event callback error: {e}")
+
+    @staticmethod
     def _send_json(proc: subprocess.Popen, payload: dict):
         raw = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
         proc.stdin.write(raw + "\n")
@@ -100,6 +109,13 @@ class CodexRuntimeBridge:
                 continue
 
             if line is None:
+                continue
+            if tag == "stderr":
+                if on_event:
+                    try:
+                        on_event({"method": "runtime/stderr", "params": {"text": str(line)}})
+                    except Exception as e:
+                        logger.warning(f"stderr parser error (ignored): {e}")
                 continue
             if tag != "stdout":
                 continue
@@ -126,7 +142,11 @@ class CodexRuntimeBridge:
                 continue
 
             if method and on_event:
-                done = bool(on_event(msg))
+                try:
+                    done = bool(on_event(msg))
+                except Exception as e:
+                    logger.warning(f"app-server parser error (ignored): {e}")
+                    done = False
                 if done:
                     return {"success": True, "result": {"done": True}}
 
@@ -160,11 +180,13 @@ class CodexRuntimeBridge:
         self,
         prompt_text: str,
         on_chunk: Callable[[str], None] | None = None,
+        runtime_event_callback: Callable[[dict[str, Any]], None] | None = None,
         timeout_sec: int = 600,
     ) -> dict:
         cmd = self._build_command(prompt_text)
         cwd = self._resolve_workspace()
         env = self.env_manager.get_codex_env()
+        self._emit_event(runtime_event_callback, {"kind": "status", "text": "Đang kết nối Codex app-server..."})
 
         proc = subprocess.Popen(
             cmd,
@@ -187,7 +209,45 @@ class CodexRuntimeBridge:
         final_delta_parts: list[str] = []
         error_messages: list[str] = []
 
-        def on_event(msg: dict) -> bool:
+        def _extract_text(value: Any) -> str:
+            if isinstance(value, str):
+                return self._clean_chunk(value).strip()
+            return ""
+
+        def _extract_text_from_content(content: Any) -> str:
+            if isinstance(content, str):
+                return _extract_text(content)
+            if isinstance(content, dict):
+                direct = _extract_text(content.get("text"))
+                if direct:
+                    return direct
+                return _extract_text(content.get("delta"))
+            if isinstance(content, list):
+                out: list[str] = []
+                for part in content:
+                    if isinstance(part, dict):
+                        text = _extract_text(part.get("text"))
+                        if not text:
+                            text = _extract_text((part.get("data") or {}).get("text"))
+                        if text:
+                            out.append(text)
+                    elif isinstance(part, str):
+                        text = _extract_text(part)
+                        if text:
+                            out.append(text)
+                return "\n".join(out).strip()
+            return ""
+
+        def _emit(kind: str, text: str, raw: dict | None = None):
+            body = _extract_text(text)
+            if not body:
+                return
+            payload: dict[str, Any] = {"kind": kind, "text": body}
+            if raw is not None:
+                payload["raw"] = raw
+            self._emit_event(runtime_event_callback, payload)
+
+        def handle_notification(msg: dict) -> bool:
             nonlocal final_text
             method = str(msg.get("method") or "")
 
@@ -199,14 +259,17 @@ class CodexRuntimeBridge:
 
                 if ev_type in {"agent_reasoning_delta", "reasoning_content_delta", "agent_reasoning_raw_content_delta"}:
                     delta = self._clean_chunk(ev.get("delta", ""))
-                    if delta and on_chunk:
-                        on_chunk("thinking\n" + delta + "\n")
+                    if delta:
+                        _emit("reasoning", delta, raw=msg)
+                        if on_chunk:
+                            on_chunk("thinking\n" + delta + "\n")
                     return False
 
                 if ev_type in {"agent_message_delta", "agent_message_content_delta"}:
                     delta = self._clean_chunk(ev.get("delta", ""))
                     if delta:
                         final_delta_parts.append(delta)
+                        _emit("assistant_delta", delta, raw=msg)
                     return False
 
                 if ev_type == "agent_message":
@@ -214,27 +277,121 @@ class CodexRuntimeBridge:
                     message = self._clean_chunk(ev.get("message", ""))
                     if phase == "final_answer" and message:
                         final_text = message
+                    if message:
+                        _emit("assistant", message, raw=msg)
                     return False
 
                 if ev_type in {"task_complete", "turn_complete"}:
                     last_agent = self._clean_chunk(ev.get("last_agent_message", ""))
                     if last_agent:
                         final_text = last_agent
+                    _emit("status", "Codex đã hoàn tất lượt xử lý.", raw=msg)
                     return True
 
                 if ev_type in {"error", "stream_error"}:
                     message = self._clean_chunk(ev.get("message", ""))
                     if message:
                         error_messages.append(message)
+                        _emit("error", message, raw=msg)
                     return False
+
+                return False
+
+            if method == "thread/event":
+                params = msg.get("params") or {}
+                ev_type = str(params.get("type") or "").strip()
+                event_obj = params.get("event")
+                if isinstance(event_obj, dict):
+                    event_payload = event_obj
+                else:
+                    event_payload = params
+                ev_low = ev_type.lower()
+
+                if any(x in ev_low for x in ("reasoning", "thinking")):
+                    delta = _extract_text(event_payload.get("delta")) or _extract_text(event_payload.get("text"))
+                    if not delta:
+                        delta = _extract_text((event_payload.get("message") or {}).get("delta"))
+                    if delta:
+                        _emit("reasoning", delta, raw=msg)
+                        if on_chunk:
+                            on_chunk("thinking\n" + delta + "\n")
+                    return False
+
+                if any(x in ev_low for x in ("message.delta", "assistant_message.delta", "text.delta", "output_text.delta")):
+                    delta = _extract_text(event_payload.get("delta")) or _extract_text(event_payload.get("text"))
+                    if not delta:
+                        delta = _extract_text((event_payload.get("message") or {}).get("delta"))
+                    if delta:
+                        final_delta_parts.append(delta)
+                        _emit("assistant_delta", delta, raw=msg)
+                    return False
+
+                if any(x in ev_low for x in ("message.completed", "assistant_message.completed", "output_text.completed")):
+                    message_text = _extract_text(event_payload.get("text"))
+                    if not message_text:
+                        message_text = _extract_text_from_content(event_payload.get("content"))
+                    if message_text:
+                        final_text = message_text
+                        _emit("assistant", message_text, raw=msg)
+                    return False
+
+                if any(x in ev_low for x in ("tool", "command")):
+                    tool_name = (
+                        _extract_text(event_payload.get("tool_name"))
+                        or _extract_text(event_payload.get("name"))
+                        or _extract_text(event_payload.get("command"))
+                    )
+                    log_text = _extract_text(event_payload.get("message")) or _extract_text(event_payload.get("text"))
+                    text = log_text or (f"Đang chạy tool: {tool_name}" if tool_name else "Đang chạy tool...")
+                    _emit("tool", text, raw=msg)
+                    return False
+
+                if "log" in ev_low:
+                    log_text = _extract_text(event_payload.get("message")) or _extract_text(event_payload.get("text"))
+                    if log_text:
+                        _emit("log", log_text, raw=msg)
+                    return False
+
+                if "error" in ev_low:
+                    err_text = _extract_text(event_payload.get("message")) or _extract_text(event_payload.get("text"))
+                    if err_text:
+                        error_messages.append(err_text)
+                        _emit("error", err_text, raw=msg)
+                    return False
+
+                if any(x in ev_low for x in ("turn.completed", "task.complete", "thread.completed", "response.completed")):
+                    last_agent = _extract_text(event_payload.get("last_agent_message")) or _extract_text(
+                        event_payload.get("message")
+                    )
+                    if last_agent:
+                        final_text = last_agent
+                    _emit("status", "Codex đã hoàn tất lượt xử lý.", raw=msg)
+                    return True
 
                 return False
 
             # V2 direct notifications fallback.
             if method in {"item/reasoning/textDelta", "item/reasoning/summaryTextDelta"}:
                 delta = self._clean_chunk((msg.get("params") or {}).get("delta", ""))
-                if delta and on_chunk:
-                    on_chunk("thinking\n" + delta + "\n")
+                if delta:
+                    _emit("reasoning", delta, raw=msg)
+                    if on_chunk:
+                        on_chunk("thinking\n" + delta + "\n")
+                return False
+
+            if method in {"item/tool/call", "item/commandExecution/status", "item/fileChange/status"}:
+                params = msg.get("params") or {}
+                name = _extract_text(params.get("name")) or _extract_text(params.get("tool_name"))
+                status = _extract_text(params.get("status"))
+                text = status or (f"Đang xử lý tool: {name}" if name else "Đang xử lý tool...")
+                _emit("tool", text, raw=msg)
+                return False
+
+            if method in {"item/log", "runtime/log", "item/status"}:
+                params = msg.get("params") or {}
+                text = _extract_text(params.get("message")) or _extract_text(params.get("text"))
+                if text:
+                    _emit("log", text, raw=msg)
                 return False
 
             if method in {"item/completed"}:
@@ -248,10 +405,55 @@ class CodexRuntimeBridge:
                     merged = self._clean_chunk("\n".join(text_buf).strip())
                     if merged:
                         final_text = merged
+                        _emit("assistant", merged, raw=msg)
                 return False
 
             if method in {"turn/completed"}:
+                _emit("status", "Codex đã hoàn tất lượt xử lý.", raw=msg)
                 return True
+
+            if method == "runtime/stderr":
+                text = _extract_text((msg.get("params") or {}).get("text"))
+                if text:
+                    _emit("log", text, raw=msg)
+                return False
+
+            # Generic parser fallback cho schema mới/chưa biết.
+            params = msg.get("params") or {}
+            method_low = method.lower()
+            generic_text = (
+                _extract_text(params.get("delta"))
+                or _extract_text(params.get("text"))
+                or _extract_text(params.get("message"))
+                or _extract_text_from_content(params.get("content"))
+            )
+
+            if isinstance(params, dict):
+                item = params.get("item")
+                if isinstance(item, dict):
+                    item_text = (
+                        _extract_text(item.get("delta"))
+                        or _extract_text(item.get("text"))
+                        or _extract_text_from_content(item.get("content"))
+                    )
+                    if item_text and not generic_text:
+                        generic_text = item_text
+
+            if generic_text:
+                if "reason" in method_low or "thinking" in method_low:
+                    _emit("reasoning", generic_text, raw=msg)
+                    if on_chunk:
+                        on_chunk("thinking\n" + generic_text + "\n")
+                    return False
+                if any(x in method_low for x in ("assistant", "message", "response", "output")):
+                    final_delta_parts.append(generic_text)
+                    _emit("assistant_delta", generic_text, raw=msg)
+                    return False
+                if any(x in method_low for x in ("tool", "command", "approval", "exec")):
+                    _emit("tool", generic_text, raw=msg)
+                    return False
+                _emit("log", generic_text, raw=msg)
+                return False
 
             return False
 
@@ -272,6 +474,7 @@ class CodexRuntimeBridge:
             init_resp = self._wait_for_response(proc, msg_queue, init_id, timeout_sec=8)
             if not init_resp.get("success"):
                 return {"success": False, "message": init_resp.get("message", "initialize thất bại"), "output": ""}
+            self._emit_event(runtime_event_callback, {"kind": "status", "text": "Kết nối app-server thành công."})
 
             # initialized notif
             self._send_json(proc, self._jsonrpc_notification("initialized"))
@@ -312,10 +515,11 @@ class CodexRuntimeBridge:
                 self._jsonrpc_request(
                     "addConversationListener",
                     listen_req,
-                    {"conversationId": conversation_id, "experimentalRawEvents": False},
+                    {"conversationId": conversation_id, "experimentalRawEvents": True},
                 ),
             )
             self._wait_for_response(proc, msg_queue, listen_req, timeout_sec=8)
+            self._emit_event(runtime_event_callback, {"kind": "status", "text": "Đang gửi yêu cầu cho Codex..."})
 
             # send user message
             send_req = self._next_request_id()
@@ -340,7 +544,7 @@ class CodexRuntimeBridge:
                 msg_queue,
                 target_id=-999999,  # dummy id, we only rely on on_event done signal.
                 timeout_sec=timeout_sec,
-                on_event=on_event,
+                on_event=handle_notification,
             )
             if not turn_done.get("success"):
                 partial = final_text or "".join(final_delta_parts).strip()
@@ -370,6 +574,7 @@ class CodexRuntimeBridge:
         self,
         prompt_text: str,
         on_chunk: Callable[[str], None] | None = None,
+        runtime_event_callback: Callable[[dict[str, Any]], None] | None = None,
         timeout_sec: int = 600,
     ) -> dict:
         cmd = self._build_exec_command(prompt_text)
@@ -377,6 +582,7 @@ class CodexRuntimeBridge:
         env = self.env_manager.get_codex_env()
         started_at = time.monotonic()
         chunks: list[str] = []
+        self._emit_event(runtime_event_callback, {"kind": "status", "text": "Đang chạy Codex fallback exec..."})
 
         try:
             proc = subprocess.Popen(
@@ -413,6 +619,7 @@ class CodexRuntimeBridge:
                     if not clean.strip():
                         continue
                     chunks.append(clean)
+                    self._emit_event(runtime_event_callback, {"kind": "log", "text": clean.strip()})
                     if on_chunk:
                         on_chunk(clean)
 
@@ -436,6 +643,7 @@ class CodexRuntimeBridge:
         self,
         prompt: str,
         on_chunk: Callable[[str], None] | None = None,
+        runtime_event_callback: Callable[[dict[str, Any]], None] | None = None,
         timeout_sec: int = 600,
     ) -> dict:
         prompt_text = str(prompt or "").strip()
@@ -456,16 +664,29 @@ class CodexRuntimeBridge:
                 result = self._stream_reply_app_server(
                     prompt_text=prompt_text,
                     on_chunk=on_chunk,
+                    runtime_event_callback=runtime_event_callback,
                     timeout_sec=timeout_sec,
                 )
                 if result.get("success"):
                     return result
+                self._emit_event(
+                    runtime_event_callback,
+                    {
+                        "kind": "warning",
+                        "text": f"app-server lỗi, chuyển sang exec: {result.get('message', 'unknown error')}",
+                    },
+                )
                 logger.warning(f"app-server failed, fallback exec: {result.get('message', '')}")
             except Exception as e:
+                self._emit_event(
+                    runtime_event_callback,
+                    {"kind": "warning", "text": f"app-server exception, fallback exec: {e}"},
+                )
                 logger.warning(f"app-server exception, fallback exec: {e}")
 
         return self._stream_reply_exec(
             prompt_text=prompt_text,
             on_chunk=on_chunk,
+            runtime_event_callback=runtime_event_callback,
             timeout_sec=timeout_sec,
         )
