@@ -153,7 +153,7 @@ GET /api/v1/omnimind/skills
       "id": "office-meeting-notes",
       "name": "Office Meeting Notes",
       "description": "...",
-      "skill_type": "PRODUCTIVITY",
+      "skill_type": "KNOWLEDGE",
       "price": 0,
       "author": "OmniMind Team",
       "version": "1.0.0",
@@ -161,6 +161,13 @@ GET /api/v1/omnimind/skills
       "icon": "📝",
       "badge": "FREE",
       "color": "#0EA5E9",
+      "category": "office",
+      "tags": ["office", "meeting"],
+      "required_capabilities": ["screen_capture"],
+      "metadata_version": "1.0",
+      "downloads": {
+        "darwin": { "url": "https://license.vinhyenit.com/skills/office_meeting_notes.zip" }
+      },
       "download_url": "https://license.vinhyenit.com/skills/office_meeting_notes.zip",
       "is_owned": true,
       "requires_purchase": false
@@ -186,7 +193,9 @@ GET /api/v1/omnimind/skills/:id/manifest
   "skill_id": "office-meeting-notes",
   "name": "Office Meeting Notes",
   "version": "1.0.0",
+  "metadata_version": "1.0",
   "icon": "📝",
+  "required_capabilities": [],
   "downloads": {
     "darwin": { "url": "https://..." }
   }
@@ -324,14 +333,21 @@ Body mẫu:
   "id": "office-meeting-notes",
   "name": "Office Meeting Notes",
   "description": "...",
-  "skill_type": "PRODUCTIVITY",
+  "skill_type": "KNOWLEDGE",
   "price": 0,
   "author": "OmniMind Team",
   "version": "1.0.0",
   "is_vip": false,
   "manifest_json": {
+    "metadata_version": "1.0",
     "icon": "📝",
+    "badge": "FREE",
+    "color": "#0EA5E9",
+    "category": "office",
+    "tags": ["office", "meeting"],
     "short_description": "...",
+    "detail_description": "...",
+    "required_capabilities": ["screen_capture"],
     "downloads": {
       "darwin": { "url": "https://license.vinhyenit.com/skills/office_meeting_notes.zip" },
       "win32": { "url": "https://license.vinhyenit.com/skills/office_meeting_notes.zip" },
@@ -340,6 +356,11 @@ Body mẫu:
   }
 }
 ```
+
+Validation quan trọng:
+- `skill_type` chỉ nhận `KNOWLEDGE` hoặc `TOOL`.
+- `manifest_json` phải là object JSON hợp lệ.
+- `manifest_json.downloads` phải có ít nhất một URL hợp lệ trong `darwin|win32|linux`.
 
 ### PATCH /api/v1/admin/omnimind/skills/:id
 Cập nhật một phần field skill (`name`, `description`, `skill_type`, `price`, `author`, `version`, `manifest_json`, `is_vip`).
@@ -398,4 +419,3 @@ Ngoài ra có public endpoint cũ:
 - `PATCH /api/v1/admin/omnimind/skills/:id`
 - `DELETE /api/v1/admin/omnimind/skills/:id`
 - `POST /api/v1/admin/omnimind/skills/:id/grant`
-

@@ -135,17 +135,23 @@ Vào CMS (`license-dashboard`) -> menu `Marketplace Skills` -> `Tạo Skill`.
 - `Giá`
 - `VIP`
 - `Mô tả ngắn` (`description`)
-- `Manifest JSON`
+- `Icon`, `Badge`, `Color`, `Category`
+- `Short Description`, `Detail Description`
+- `Downloads` theo từng OS (`darwin`, `win32`, `linux`) - ít nhất 1 link
 
-### 4.2 Manifest JSON khuyến nghị
+### 4.2 Metadata chuẩn được CMS build thành `manifest_json`
 
 ```json
 {
+  "metadata_version": "1.0",
   "icon": "📝",
   "badge": "FREE",
   "color": "#0EA5E9",
+  "category": "office",
+  "tags": ["office", "meeting"],
   "short_description": "Biến ghi chú họp thành tóm tắt và action items.",
   "detail_description": "Chuẩn hóa biên bản họp theo summary, decisions, risks, action items.",
+  "required_capabilities": ["screen_capture"],
   "downloads": {
     "darwin": { "url": "https://license.vinhyenit.com/skills/office_meeting_notes.zip" },
     "win32": { "url": "https://license.vinhyenit.com/skills/office_meeting_notes.zip" },
