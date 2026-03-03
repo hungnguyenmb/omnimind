@@ -48,12 +48,25 @@ Các ý chính cần triển khai:
 - Nếu file lớn vượt giới hạn Telegram, tự nén/chia nhỏ hoặc trả link tải nội bộ.
 - Gửi kèm caption tóm tắt nội dung file.
 
+## 5) Chuẩn hoá text hiển thị thương hiệu: `Codex` -> `OmniMind`
+
+Mục tiêu:
+- Toàn bộ text hiển thị trên UI và tin nhắn gửi cho user dùng tên `OmniMind` thay cho `Codex`.
+
+Các ý chính cần triển khai:
+- Rà soát toàn bộ label/button/toast/dialog và đổi text hiển thị `Codex` -> `OmniMind`.
+- Rà soát text trả về Telegram (draft thinking/final response/system notice) và đổi đồng bộ.
+- Không đổi các tên kỹ thuật nội bộ bắt buộc tương thích (ví dụ: API route, tên binary/lệnh CLI, key config).
+- Gom text hiển thị vào constants để tránh sót khi đổi branding ở lần sau.
+- Thêm checklist regression UI để đảm bảo không còn chuỗi `Codex` lộ ra ngoài trải nghiệm người dùng.
+
 ## Gợi ý thứ tự ưu tiên
 
 1. Thư mục mặc định lưu file Telegram.
 2. Nhận ảnh Telegram -> chuyển Codex xử lý.
 3. Gửi lại file tài liệu do Codex tạo.
 4. SePay payment + webhook + cấp quyền.
+5. Chuẩn hoá text hiển thị `Codex` -> `OmniMind`.
 
 ---
 
@@ -85,3 +98,8 @@ Các ý chính cần triển khai:
   - Tăng độ chính xác parser artifact path (hiện đang theo regex heuristic).
   - Bổ sung policy allowlist path trước khi gửi file ngược Telegram.
   - Chuẩn hóa luồng multimodal nếu muốn phân tích ảnh native theo model vision.
+
+### Sprint 4 (Mới) - Branding Consistency
+- Đổi toàn bộ text hiển thị trên app và Telegram từ `Codex` sang `OmniMind`.
+- Chuẩn hoá text constants để tránh hardcode rải rác.
+- Giữ nguyên các định danh kỹ thuật nội bộ liên quan CLI/API để không ảnh hưởng tương thích.

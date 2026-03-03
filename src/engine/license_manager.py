@@ -12,16 +12,18 @@ import subprocess
 import hashlib
 import logging
 import json
-import os
+import requests
+from engine.config_manager import ConfigManager
+from engine.http_client import request_with_retry
 
 logger = logging.getLogger(__name__)
 
 # ─── Cấu hình API ───────────────────────────────────────────────
-# Biến môi trường OMNIMIND_API_URL quy định Server trỏ tới.
-# - Dev/Test (localhost): http://localhost:8050
-# - Production (VPS):     https://license.vinhyenit.com
-DEFAULT_API_BASE_URL = os.environ.get("OMNIMIND_API_URL", "http://localhost:8050")
 LICENSE_VERIFY_ENDPOINT = "/api/v1/omnimind/licenses/verify"
+LICENSE_ENTITLEMENTS_ENDPOINT = "/api/v1/omnimind/licenses/{license_key}/entitlements"
+LICENSE_PLANS_ENDPOINT = "/api/v1/omnimind/licenses/plans"
+LICENSE_PURCHASE_ENDPOINT = "/api/v1/omnimind/licenses/purchase"
+PAYMENT_ORDER_ENDPOINT = "/api/v1/omnimind/payments/orders/{order_id}"
 
 
 class LicenseManager:
@@ -32,7 +34,7 @@ class LicenseManager:
     def __init__(self, db_manager=None):
         from database.db_manager import DBManager
         self.db = db_manager or DBManager()
-        self._api_base_url = DEFAULT_API_BASE_URL
+        self._api_base_url = ConfigManager.get_api_base_url()
 
     # ──────────────────────────────────────────────────────────────
     # 1. HARDWARE ID (HWID) - Cross-Platform
@@ -161,8 +163,6 @@ class LicenseManager:
         Returns:
             dict: { "success": bool, "message": str, "plan": str|None, ... }
         """
-        import requests
-
         hwid = self.get_hwid()
         os_info = self.get_os_info()
 
@@ -177,12 +177,17 @@ class LicenseManager:
         logger.info(f"Verifying license at {url}...")
 
         try:
-            response = requests.post(url, json=payload, timeout=15)
+            response = request_with_retry("POST", url, json=payload, timeout=15, max_attempts=4)
             data = response.json()
 
             if response.status_code == 200 and data.get("success"):
                 # Kích hoạt thành công → Lưu vào DB cục bộ
                 self._save_activation(license_key, data)
+                # Đồng bộ entitlement mới nhất (plan/expiry/skills) để UI luôn chuẩn.
+                try:
+                    self.sync_entitlements(license_key)
+                except Exception:
+                    pass
                 return {
                     "success": True,
                     "message": data.get("message", "Kích hoạt thành công!"),
@@ -219,6 +224,177 @@ class LicenseManager:
                 "success": False,
                 "message": f"Lỗi không xác định: {str(e)}",
             }
+
+    def sync_entitlements(self, license_key: str | None = None) -> dict:
+        """
+        Đồng bộ quyền hiện tại từ server:
+        - plan, expires, trạng thái license
+        - danh sách skill đã sở hữu
+        Đồng thời cập nhật cache SQLite/local config để UI đọc nhanh.
+        """
+        key = (license_key or self.get_saved_license() or "").strip()
+        if not key:
+            return {"success": False, "message": "Chưa có license key để đồng bộ entitlement."}
+
+        url = f"{self._api_base_url}{LICENSE_ENTITLEMENTS_ENDPOINT.format(license_key=key)}"
+        try:
+            response = request_with_retry("GET", url, timeout=15, max_attempts=4)
+            data = response.json() if response.content else {}
+            if response.status_code != 200 or not data.get("success"):
+                return {
+                    "success": False,
+                    "message": data.get("message", "Không lấy được entitlement từ server."),
+                    "status_code": response.status_code,
+                }
+
+            license_info = data.get("license") if isinstance(data.get("license"), dict) else {}
+            entitlements = data.get("entitlements") if isinstance(data.get("entitlements"), dict) else {}
+            purchased_skills = entitlements.get("purchased_skills") if isinstance(entitlements.get("purchased_skills"), list) else []
+
+            self.db.execute_query(
+                "INSERT OR REPLACE INTO app_configs (key, value) VALUES (?, ?)",
+                ("license_key", key),
+                commit=True,
+            )
+            self.db.execute_query(
+                "INSERT OR REPLACE INTO app_configs (key, value) VALUES (?, ?)",
+                ("license_plan", str(license_info.get("plan_id", "Standard"))),
+                commit=True,
+            )
+            self.db.execute_query(
+                "INSERT OR REPLACE INTO app_configs (key, value) VALUES (?, ?)",
+                ("license_expires", str(license_info.get("expires_at", ""))),
+                commit=True,
+            )
+            self.db.execute_query(
+                "INSERT OR REPLACE INTO app_configs (key, value) VALUES (?, ?)",
+                ("license_status", str(license_info.get("status", "unknown"))),
+                commit=True,
+            )
+            self.db.execute_query(
+                "INSERT OR REPLACE INTO app_configs (key, value) VALUES (?, ?)",
+                ("license_activated", "True" if bool(license_info.get("is_active", False)) else "False"),
+                commit=True,
+            )
+
+            self.db.execute_query(
+                """
+                INSERT OR REPLACE INTO license_details (license_key, plan_id, status, issued_source, activated_at, expires_at)
+                VALUES (?, ?, ?, ?, COALESCE((SELECT activated_at FROM license_details WHERE license_key = ?), CURRENT_TIMESTAMP), ?)
+                """,
+                (
+                    key,
+                    str(license_info.get("plan_id", "Standard")),
+                    str(license_info.get("status", "unknown")),
+                    str(license_info.get("issued_source", "unknown")),
+                    key,
+                    str(license_info.get("expires_at", "")),
+                ),
+                commit=True,
+            )
+
+            self.db.execute_query(
+                "DELETE FROM purchased_skills WHERE license_key = ?",
+                (key,),
+                commit=True,
+            )
+            for row in purchased_skills:
+                if not isinstance(row, dict):
+                    continue
+                skill_id = str(row.get("skill_id", "")).strip()
+                if not skill_id:
+                    continue
+                self.db.execute_query(
+                    """
+                    INSERT INTO purchased_skills (skill_id, license_key, purchased_at)
+                    VALUES (?, ?, ?)
+                    """,
+                    (
+                        skill_id,
+                        key,
+                        str(row.get("purchased_at", "")) or None,
+                    ),
+                    commit=True,
+                )
+
+            return {
+                "success": True,
+                "license": license_info,
+                "entitlements": entitlements,
+            }
+        except requests.ConnectionError:
+            return {"success": False, "message": "Không kết nối được máy chủ entitlement."}
+        except requests.Timeout:
+            return {"success": False, "message": "Timeout khi đồng bộ entitlement."}
+        except Exception as e:
+            logger.error(f"sync_entitlements error: {e}")
+            return {"success": False, "message": str(e)}
+
+    def fetch_license_plans(self) -> dict:
+        url = f"{self._api_base_url}{LICENSE_PLANS_ENDPOINT}"
+        try:
+            response = request_with_retry("GET", url, timeout=15, max_attempts=4)
+            data = response.json() if response.content else {}
+            if response.status_code != 200 or not data.get("success"):
+                return {
+                    "success": False,
+                    "message": data.get("message", "Không tải được bảng giá license."),
+                    "code": data.get("code"),
+                    "status_code": response.status_code,
+                }
+            plans = data.get("plans") if isinstance(data.get("plans"), list) else []
+            return {"success": True, "plans": plans}
+        except Exception as e:
+            return {"success": False, "message": str(e)}
+
+    def create_license_purchase_order(self, plan_id: str, target_license_key: str = "") -> dict:
+        payload = {
+            "plan_id": str(plan_id or "").strip(),
+            "target_license_key": str(target_license_key or "").strip(),
+        }
+        try:
+            response = request_with_retry(
+                "POST",
+                f"{self._api_base_url}{LICENSE_PURCHASE_ENDPOINT}",
+                json=payload,
+                timeout=20,
+                max_attempts=4,
+            )
+            data = response.json() if response.content else {}
+            if response.status_code in (200, 201) and data.get("success"):
+                return data
+            if response.status_code == 402:
+                return data
+            return {
+                "success": False,
+                "message": data.get("message", f"Lỗi HTTP {response.status_code}"),
+                "code": data.get("code"),
+                "status_code": response.status_code,
+            }
+        except Exception as e:
+            return {"success": False, "message": str(e)}
+
+    def get_payment_order_status(self, order_id: str, order_code: str = "") -> dict:
+        oid = str(order_id or "").strip()
+        if not oid:
+            return {"success": False, "message": "Thiếu order_id."}
+        params = {}
+        if order_code:
+            params["order_code"] = str(order_code).strip()
+        url = f"{self._api_base_url}{PAYMENT_ORDER_ENDPOINT.format(order_id=oid)}"
+        try:
+            response = request_with_retry("GET", url, params=params, timeout=15, max_attempts=4)
+            data = response.json() if response.content else {}
+            if response.status_code != 200 or not data.get("success"):
+                return {
+                    "success": False,
+                    "message": data.get("message", "Không lấy được trạng thái giao dịch."),
+                    "code": data.get("code"),
+                    "status_code": response.status_code,
+                }
+            return {"success": True, "order": data.get("order", {})}
+        except Exception as e:
+            return {"success": False, "message": str(e)}
 
     # ──────────────────────────────────────────────────────────────
     # 4. LƯU TRẠNG THÁI KÍCH HOẠT VÀO DB CỤC BỘ

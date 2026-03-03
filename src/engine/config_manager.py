@@ -4,6 +4,7 @@ from pathlib import Path
 from database.db_manager import db
 
 logger = logging.getLogger(__name__)
+DEFAULT_API_BASE_URL = "https://license.vinhyenit.com"
 
 class ConfigManager:
     """
@@ -58,6 +59,30 @@ class ConfigManager:
     @classmethod
     def set_workspace_path(cls, path: str):
         cls.set("workspace_path", path)
+
+    @classmethod
+    def get_api_base_url(cls) -> str:
+        """
+        Resolve API base URL theo thứ tự ưu tiên:
+        1) ENV OMNIMIND_API_URL
+        2) DB app_configs: omnimind_api_url / OMNIMIND_API_URL
+        3) Mặc định production VPS
+        """
+        env_val = os.environ.get("OMNIMIND_API_URL", "").strip()
+        if env_val:
+            return env_val
+        cfg_val = (cls.get("omnimind_api_url", "").strip() or cls.get("OMNIMIND_API_URL", "").strip())
+        if cfg_val:
+            return cfg_val
+        return DEFAULT_API_BASE_URL
+
+    @classmethod
+    def set_api_base_url(cls, url: str):
+        normalized = str(url or "").strip().rstrip("/")
+        if not normalized:
+            normalized = DEFAULT_API_BASE_URL
+        cls.set("omnimind_api_url", normalized)
+        cls.set("OMNIMIND_API_URL", normalized)
 
     @classmethod
     def get_codex_home(cls) -> str:

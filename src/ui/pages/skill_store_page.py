@@ -1,6 +1,6 @@
 """
 OmniMind - Tab 5: Skill Marketplace
-Kết nối API thật để xem marketplace, cài đặt và gỡ skills cho Codex.
+Kết nối API thật để xem marketplace, cài đặt và gỡ skills cho OmniMind.
 """
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
@@ -8,9 +8,10 @@ from PyQt5.QtWidgets import (
     QScrollArea, QDialog, QMessageBox
 )
 from PyQt5.QtCore import Qt, QThread, pyqtSignal
-from PyQt5.QtGui import QColor
+from PyQt5.QtGui import QColor, QPixmap
 
 from ui.icons import Icons
+from engine.http_client import request_with_retry
 from engine.skill_manager import SkillManager
 
 
@@ -72,6 +73,150 @@ class SkillActionWorker(QThread):
             self.finished.emit({"success": False, "message": str(e)})
 
 
+class PaymentStatusWorker(QThread):
+    status_changed = pyqtSignal(str)
+    finished = pyqtSignal(dict)
+
+    def __init__(
+        self,
+        manager: SkillManager,
+        order_id: str,
+        timeout_ms: int = 10 * 60 * 1000,
+        poll_interval_ms: int = 3000,
+        parent=None,
+    ):
+        super().__init__(parent)
+        self.manager = manager
+        self.order_id = str(order_id or "").strip()
+        self.timeout_ms = max(30_000, int(timeout_ms))
+        self.poll_interval_ms = max(1000, int(poll_interval_ms))
+
+    def run(self):
+        elapsed_ms = 0
+        last_error = ""
+        while elapsed_ms <= self.timeout_ms:
+            if self.isInterruptionRequested():
+                self.finished.emit(
+                    {"success": False, "paid": False, "message": "Đã dừng theo dõi thanh toán."}
+                )
+                return
+
+            result = self.manager.get_payment_order_status(self.order_id)
+            if result.get("success"):
+                order = result.get("order") if isinstance(result.get("order"), dict) else {}
+                status = str(order.get("status", "PENDING") or "PENDING").upper()
+                self.status_changed.emit(status)
+                if status == "SUCCESS":
+                    self.finished.emit({"success": True, "paid": True, "order": order, "status": status})
+                    return
+                if status in {"FAILED", "EXPIRED", "CANCELLED"}:
+                    self.finished.emit(
+                        {
+                            "success": False,
+                            "paid": False,
+                            "order": order,
+                            "status": status,
+                            "message": f"Thanh toán kết thúc với trạng thái {status}.",
+                        }
+                    )
+                    return
+                last_error = ""
+            else:
+                last_error = str(result.get("message", "") or "Không kiểm tra được trạng thái thanh toán.")
+                self.status_changed.emit("RETRYING")
+
+            self.msleep(self.poll_interval_ms)
+            elapsed_ms += self.poll_interval_ms
+
+        self.finished.emit(
+            {
+                "success": False,
+                "paid": False,
+                "status": "TIMEOUT",
+                "message": last_error or "Hết thời gian chờ thanh toán.",
+            }
+        )
+
+
+class SkillPaymentQrDialog(QDialog):
+    def __init__(self, skill_name: str, amount_text: str, qr_url: str, parent=None):
+        super().__init__(parent)
+        self._qr_url = str(qr_url or "").strip()
+        self.setWindowTitle("Thanh toán skill")
+        self.setMinimumWidth(420)
+        self.setModal(True)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(24, 20, 24, 20)
+        layout.setSpacing(12)
+
+        title = QLabel("Quét mã QR để thanh toán")
+        title.setStyleSheet("font-size: 18px; font-weight: 700; color: #0F172A;")
+        layout.addWidget(title)
+
+        skill_lbl = QLabel(f"Skill: {skill_name}")
+        skill_lbl.setStyleSheet("font-size: 14px; color: #334155;")
+        layout.addWidget(skill_lbl)
+
+        amount_lbl = QLabel(f"Số tiền: {amount_text}")
+        amount_lbl.setStyleSheet("font-size: 14px; font-weight: 700; color: #0F172A;")
+        layout.addWidget(amount_lbl)
+
+        note_lbl = QLabel("Sau khi thanh toán thành công, cửa sổ sẽ tự đóng và skill sẽ tự cài đặt.")
+        note_lbl.setWordWrap(True)
+        note_lbl.setStyleSheet("font-size: 12px; color: #64748B;")
+        layout.addWidget(note_lbl)
+
+        self.qr_label = QLabel("Đang tải mã QR...")
+        self.qr_label.setAlignment(Qt.AlignCenter)
+        self.qr_label.setFixedSize(300, 300)
+        self.qr_label.setStyleSheet("border: 1px solid #E2E8F0; border-radius: 10px; background: #FFFFFF;")
+        layout.addWidget(self.qr_label, alignment=Qt.AlignHCenter)
+
+        self.status_label = QLabel("Đang chờ thanh toán...")
+        self.status_label.setAlignment(Qt.AlignCenter)
+        self.status_label.setStyleSheet("font-size: 12px; color: #64748B;")
+        layout.addWidget(self.status_label)
+
+        btn_row = QHBoxLayout()
+        btn_row.addStretch()
+        cancel_btn = QPushButton("Hủy")
+        cancel_btn.setObjectName("SecondaryBtn")
+        cancel_btn.setCursor(Qt.PointingHandCursor)
+        cancel_btn.clicked.connect(self.reject)
+        btn_row.addWidget(cancel_btn)
+        layout.addLayout(btn_row)
+
+        self._load_qr()
+
+    def _load_qr(self):
+        if not self._qr_url:
+            self.qr_label.setText("Không có mã QR.")
+            return
+        try:
+            resp = request_with_retry("GET", self._qr_url, timeout=20, max_attempts=3)
+            if resp.status_code != 200 or not resp.content:
+                self.qr_label.setText("Không tải được mã QR.")
+                return
+            pix = QPixmap()
+            if not pix.loadFromData(resp.content):
+                self.qr_label.setText("Không tải được mã QR.")
+                return
+            scaled = pix.scaled(280, 280, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            self.qr_label.setPixmap(scaled)
+            self.qr_label.setText("")
+        except Exception:
+            self.qr_label.setText("Không tải được mã QR.")
+
+    def set_runtime_status(self, text: str):
+        self.status_label.setText(str(text or "").strip() or "Đang chờ thanh toán...")
+        self.status_label.setStyleSheet("font-size: 12px; color: #64748B;")
+
+    def mark_paid(self):
+        self.status_label.setText("Đã nhận thanh toán. Đang cài đặt skill...")
+        self.status_label.setStyleSheet("font-size: 12px; color: #10B981; font-weight: 700;")
+
+
 class SkillDetailDialog(QDialog):
     INSTALL_RESULT = 1
     UNINSTALL_RESULT = 2
@@ -127,9 +272,13 @@ class SkillDetailDialog(QDialog):
         detail_lbl.setWordWrap(True)
         layout.addWidget(detail_lbl)
 
-        price = float(self.skill.get("price", 0) or 0)
+        pricing = self.skill.get("pricing") if isinstance(self.skill.get("pricing"), dict) else {}
+        price = float(self.skill.get("effective_price", self.skill.get("price", 0)) or 0)
         owned = bool(self.skill.get("is_owned", False))
-        status_text = "Miễn phí" if price <= 0 else f"Giá: {price:.2f}"
+        status_text = "Miễn phí" if price <= 0 else f"Giá: {price:.2f} VND"
+        discount_amount = float(pricing.get("discount_amount", 0) or 0)
+        if discount_amount > 0:
+            status_text += f" · Giảm: {discount_amount:.2f} VND"
         if owned:
             status_text += " · Đã có quyền"
         status_lbl = QLabel(status_text)
@@ -177,7 +326,11 @@ class SkillStorePage(QWidget):
         self.installed_ids = set()
         self._load_worker = None
         self._action_worker = None
+        self._payment_worker = None
+        self._payment_dialog = None
+        self._payment_cancelled_by_user = False
         self._pending_action = None
+        self._pending_payment = None
         self._setup_ui()
         self._reload_data()
 
@@ -193,7 +346,7 @@ class SkillStorePage(QWidget):
         title = QLabel("Skill Marketplace")
         title.setObjectName("PageTitle")
         desc = QLabel(
-            "Tải về các kỹ năng AI chuyên biệt từ server và cài vào Codex local. "
+            "Tải về các kỹ năng AI chuyên biệt từ server và cài vào OmniMind local. "
             "Sau khi cài, skill sẽ khả dụng cho các phiên làm việc mới."
         )
         desc.setObjectName("PageDesc")
@@ -359,12 +512,15 @@ class SkillStorePage(QWidget):
         elif result == SkillDetailDialog.UNINSTALL_RESULT and installed:
             self._run_action("uninstall", skill)
 
-    def _run_action(self, action: str, skill: dict):
+    def _run_action(self, action: str, skill: dict, force_skip_purchase: bool = False):
         if self._action_worker and self._action_worker.isRunning():
+            return
+        if self._payment_worker and self._payment_worker.isRunning():
+            QMessageBox.information(self, "Skill Marketplace", "Đang chờ thanh toán. Vui lòng đợi hoàn tất.")
             return
 
         skill_id = skill.get("id", "")
-        requires_purchase = bool(skill.get("requires_purchase", False))
+        requires_purchase = bool(skill.get("requires_purchase", False)) and not force_skip_purchase
         verb = "cài đặt" if action == "install" else "gỡ cài đặt"
         self._set_busy(True, f"Đang {verb} skill '{skill_id}'...")
         self._pending_action = {"action": action, "skill_id": skill_id}
@@ -374,6 +530,93 @@ class SkillStorePage(QWidget):
         )
         self._action_worker.finished.connect(self._on_action_finished)
         self._action_worker.start()
+
+    def _find_skill_by_id(self, skill_id: str):
+        sid = str(skill_id or "").strip()
+        if not sid:
+            return None
+        for skill in self.skills:
+            if str(skill.get("id", "")).strip() == sid:
+                return skill
+        return None
+
+    def _start_payment_poll(self, skill_id: str, order_id: str):
+        if self._payment_worker and self._payment_worker.isRunning():
+            return
+        self._payment_cancelled_by_user = False
+        self._pending_payment = {"skill_id": skill_id, "order_id": order_id}
+        self._set_busy(True, f"Đang chờ thanh toán cho skill '{skill_id}'...")
+        self._payment_worker = PaymentStatusWorker(self.manager, order_id=order_id, parent=self)
+        self._payment_worker.status_changed.connect(self._on_payment_status_changed)
+        self._payment_worker.finished.connect(self._on_payment_finished)
+        self._payment_worker.start()
+
+    def _format_money(self, amount, currency: str = "VND") -> str:
+        try:
+            num = float(amount)
+            if abs(num - int(num)) < 1e-9:
+                return f"{int(num):,} {currency}".replace(",", ".")
+            return f"{num:,.2f} {currency}".replace(",", ".")
+        except Exception:
+            raw = str(amount or "").strip() or "0"
+            return f"{raw} {currency}".strip()
+
+    def _close_payment_dialog(self, accepted: bool):
+        if not self._payment_dialog:
+            return
+        dlg = self._payment_dialog
+        self._payment_dialog = None
+        if accepted:
+            dlg.accept()
+        else:
+            dlg.reject()
+
+    def _on_payment_status_changed(self, status: str):
+        status_map = {
+            "PENDING": "Chờ thanh toán...",
+            "PROCESSING": "Đang xử lý giao dịch...",
+            "SUCCESS": "Đã nhận thanh toán.",
+            "RETRYING": "Đang thử kiểm tra lại thanh toán...",
+        }
+        msg = status_map.get(str(status or "").upper(), f"Trạng thái thanh toán: {status}")
+        self.status_label.setText(msg)
+        if self._payment_dialog:
+            self._payment_dialog.set_runtime_status(msg)
+
+    def _on_payment_finished(self, payload: dict):
+        self._set_busy(False)
+        self._payment_worker = None
+
+        payment_ctx = self._pending_payment or {}
+        self._pending_payment = None
+        skill_id = payment_ctx.get("skill_id", "")
+
+        if payload.get("success") and payload.get("paid"):
+            if self._payment_dialog:
+                self._payment_dialog.mark_paid()
+            self._close_payment_dialog(accepted=True)
+            self.status_label.setText("Thanh toán thành công. Đang cài đặt skill...")
+            skill = self._find_skill_by_id(skill_id) or {"id": skill_id, "requires_purchase": False}
+            self._run_action("install", skill, force_skip_purchase=True)
+            return
+
+        self._close_payment_dialog(accepted=False)
+
+        message = payload.get("message", "Thanh toán chưa hoàn tất.")
+        status = str(payload.get("status", "") or "").upper()
+        if self._payment_cancelled_by_user:
+            self._payment_cancelled_by_user = False
+            self.status_label.setText("Đã hủy chờ thanh toán.")
+            return
+        if status == "TIMEOUT":
+            QMessageBox.information(
+                self,
+                "Thanh toán skill",
+                message + "\n\nBạn có thể thanh toán sau và bấm cài lại để kiểm tra quyền.",
+            )
+        else:
+            QMessageBox.warning(self, "Thanh toán skill", message)
+        self.status_label.setText("Thanh toán chưa hoàn tất.")
 
     def _on_action_finished(self, result: dict):
         self._set_busy(False)
@@ -431,5 +674,61 @@ class SkillStorePage(QWidget):
                             )
             self._reload_data()
         else:
+            if result.get("code") in {"PAYMENT_REQUIRED", "PAYMENT_PENDING"}:
+                payment = result.get("payment") if isinstance(result.get("payment"), dict) else {}
+                payment_id = str(payment.get("id", "") or "").strip()
+                qr_url = str(payment.get("qr_url", "") or "").strip()
+                amount = payment.get("amount")
+                currency = str(payment.get("currency", "VND") or "VND").strip()
+                skill_id = action_ctx.get("skill_id", "")
+                skill = self._find_skill_by_id(skill_id) or {}
+                skill_name = str(skill.get("name") or skill_id or "Skill")
+                amount_text = self._format_money(amount, currency)
+
+                if not payment_id or not skill_id or not qr_url:
+                    self.status_label.setText("Không lấy được mã thanh toán, vui lòng thử lại.")
+                    QMessageBox.warning(
+                        self,
+                        "Thanh toán skill",
+                        "Không lấy được thông tin mã QR thanh toán. Vui lòng thử lại.",
+                    )
+                    return
+
+                ask = QMessageBox.question(
+                    self,
+                    "Thanh toán skill",
+                    (
+                        f"Skill: {skill_name}\n"
+                        f"Số tiền: {amount_text}\n\n"
+                        "Nhấn OK để hiển thị mã QR thanh toán trong ứng dụng."
+                    ),
+                    QMessageBox.Ok | QMessageBox.Cancel,
+                    QMessageBox.Ok,
+                )
+                if ask != QMessageBox.Ok:
+                    self.status_label.setText("Đã hủy thanh toán.")
+                    return
+
+                self._payment_dialog = SkillPaymentQrDialog(
+                    skill_name=skill_name,
+                    amount_text=amount_text,
+                    qr_url=qr_url,
+                    parent=self,
+                )
+                self._start_payment_poll(skill_id=skill_id, order_id=payment_id)
+                dialog_result = self._payment_dialog.exec_()
+                if dialog_result != QDialog.Accepted and self._payment_worker and self._payment_worker.isRunning():
+                    self._payment_cancelled_by_user = True
+                    self._payment_worker.requestInterruption()
+                    self.status_label.setText("Đã hủy chờ thanh toán.")
+                return
+
             QMessageBox.warning(self, "Skill Marketplace", result.get("message", "Thao tác thất bại."))
             self.status_label.setText("Có lỗi xảy ra, vui lòng thử lại.")
+
+    def closeEvent(self, event):
+        if self._payment_worker and self._payment_worker.isRunning():
+            self._payment_worker.requestInterruption()
+            self._payment_worker.wait(1200)
+        self._close_payment_dialog(accepted=False)
+        super().closeEvent(event)

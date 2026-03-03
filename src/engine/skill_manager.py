@@ -14,7 +14,9 @@ from database.db_manager import db
 from engine.action_executor import ActionExecutor
 from engine.skill_action_runners import SkillActionRunnerRegistry
 from engine.assistant_memory_manager import AssistantMemoryManager
+from engine.conversation_orchestrator import ConversationOrchestrator
 from engine.config_manager import ConfigManager
+from engine.http_client import request_with_retry
 from engine.skill_runtime_manager import SkillRuntimeManager
 
 logger = logging.getLogger(__name__)
@@ -39,6 +41,7 @@ class SkillManager:
         self.action_executor = ActionExecutor()
         self.runner_registry = SkillActionRunnerRegistry()
         self.memory_manager = AssistantMemoryManager()
+        self.conversation_orchestrator = ConversationOrchestrator(self.memory_manager)
         self.runtime_manager = SkillRuntimeManager(
             skill_manager=self,
             action_executor=self.action_executor,
@@ -287,7 +290,7 @@ class SkillManager:
         facts_limit: int = 20,
         char_budget: int = 12000,
     ) -> dict:
-        return self.memory_manager.build_runtime_context(
+        return self.conversation_orchestrator.build_context(
             message_limit=message_limit,
             facts_limit=facts_limit,
             char_budget=char_budget,
@@ -306,16 +309,7 @@ class SkillManager:
         )
 
     def _get_api_base_url(self) -> str:
-        env_url = os.environ.get("OMNIMIND_API_URL", "").strip()
-        if env_url:
-            return env_url
-        cfg_url = (
-            ConfigManager.get("omnimind_api_url", "").strip()
-            or ConfigManager.get("OMNIMIND_API_URL", "").strip()
-        )
-        if cfg_url:
-            return cfg_url
-        return "http://localhost:8050"
+        return ConfigManager.get_api_base_url()
 
     def _platform_key(self) -> str:
         if self.os_name == "Darwin":
@@ -395,7 +389,7 @@ class SkillManager:
         }
         headers = {"Accept": "application/json"}
         try:
-            resp = requests.get(url, params=params, headers=headers, timeout=20)
+            resp = request_with_retry("GET", url, params=params, headers=headers, timeout=20, max_attempts=4)
             data = self._safe_json(resp)
             if resp.status_code != 200:
                 return {"success": False, "message": self._response_error_message(resp, data, "Không lấy được danh sách skills.")}
@@ -461,6 +455,7 @@ class SkillManager:
                 "detail": data.get("detail", data.get("detail_description", r.get("description") or "")),
                 "skill_type": r.get("skill_type"),
                 "price": r.get("price", 0),
+                "effective_price": data.get("effective_price", r.get("price", 0)),
                 "author": data.get("author", r.get("author") or ""),
                 "version": data.get("version", r.get("version") or ""),
                 "is_vip": bool(r.get("is_vip")),
@@ -470,6 +465,7 @@ class SkillManager:
                 "download_url": data.get("download_url", ""),
                 "is_owned": bool(data.get("is_owned", False)),
                 "requires_purchase": bool(data.get("requires_purchase", False)),
+                "pricing": data.get("pricing", {}),
             })
         return out
 
@@ -484,11 +480,65 @@ class SkillManager:
         url = f"{self.api_base_url}/api/v1/omnimind/skills/{skill_id}/purchase"
         headers = {"Accept": "application/json"}
         try:
-            resp = requests.post(url, json={"license_key": license_key}, headers=headers, timeout=20)
+            resp = request_with_retry(
+                "POST",
+                url,
+                json={"license_key": license_key},
+                headers=headers,
+                timeout=20,
+                max_attempts=4,
+            )
+            data = self._safe_json(resp)
+            if resp.status_code == 200:
+                return {
+                    "success": True,
+                    "message": data.get("message", "Đã cấp quyền skill."),
+                    "pricing": data.get("pricing"),
+                }
+
+            code = str(data.get("code", "")).strip().upper()
+            if code in {"PAYMENT_REQUIRED", "PAYMENT_PENDING"}:
+                payment = data.get("payment") if isinstance(data.get("payment"), dict) else {}
+                default_msg = "Skill trả phí. Vui lòng thanh toán để tiếp tục."
+                return {
+                    "success": False,
+                    "code": code,
+                    "message": data.get("message") or default_msg,
+                    "payment": payment,
+                    "pricing": data.get("pricing"),
+                }
+
+            return {"success": False, "message": self._response_error_message(resp, data, "Không thể cấp quyền skill.")}
+        except Exception as e:
+            return {"success": False, "message": str(e)}
+
+    def get_payment_order_status(self, order_id: str) -> dict:
+        order_id = str(order_id or "").strip()
+        if not order_id:
+            return {"success": False, "message": "Thiếu order id."}
+
+        license_key = self._license_key()
+        if not license_key:
+            return {"success": False, "message": "Thiếu license key để kiểm tra thanh toán."}
+
+        url = f"{self.api_base_url}/api/v1/omnimind/payments/orders/{order_id}"
+        headers = {"Accept": "application/json"}
+        params = {"license_key": license_key}
+        try:
+            resp = request_with_retry("GET", url, params=params, headers=headers, timeout=20, max_attempts=4)
             data = self._safe_json(resp)
             if resp.status_code != 200:
-                return {"success": False, "message": self._response_error_message(resp, data, "Không thể cấp quyền skill.")}
-            return {"success": True, "message": data.get("message", "Đã cấp quyền skill.")}
+                return {
+                    "success": False,
+                    "message": self._response_error_message(
+                        resp, data, "Không kiểm tra được trạng thái thanh toán."
+                    ),
+                }
+
+            order = data.get("order")
+            if not isinstance(order, dict):
+                return {"success": False, "message": "Response payment order không hợp lệ."}
+            return {"success": True, "order": order}
         except Exception as e:
             return {"success": False, "message": str(e)}
 
@@ -505,7 +555,7 @@ class SkillManager:
 
         try:
             # 1) Resolve download URL
-            resolve_resp = requests.get(download_url, params=params, headers=headers, timeout=20)
+            resolve_resp = request_with_retry("GET", download_url, params=params, headers=headers, timeout=20, max_attempts=4)
             resolve_data = self._safe_json(resolve_resp)
             if resolve_resp.status_code != 200:
                 msg = self._response_error_message(resolve_resp, resolve_data, "Không lấy được link tải skill.")
@@ -528,7 +578,13 @@ class SkillManager:
             # 2) Download artifact
             with tempfile.TemporaryDirectory() as tmpdir:
                 tmp_path = Path(tmpdir) / "skill_artifact.pkg"
-                with requests.get(artifact_url, stream=True, timeout=60) as r:
+                with request_with_retry(
+                    "GET",
+                    artifact_url,
+                    stream=True,
+                    timeout=60,
+                    max_attempts=4,
+                ) as r:
                     r.raise_for_status()
                     with open(tmp_path, "wb") as f:
                         for chunk in r.iter_content(chunk_size=1024 * 256):

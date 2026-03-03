@@ -30,17 +30,19 @@ class UpdateInstallWorker(QThread):
     progress = pyqtSignal(int, str)
     finished = pyqtSignal(dict)
 
-    def __init__(self, dashboard_mgr, download_url: str, target_version: str, parent=None):
+    def __init__(self, dashboard_mgr, download_url: str, target_version: str, checksum_sha256: str = "", parent=None):
         super().__init__(parent)
         self.dashboard_mgr = dashboard_mgr
         self.download_url = download_url
         self.target_version = target_version
+        self.checksum_sha256 = checksum_sha256
 
     def run(self):
         try:
             result = self.dashboard_mgr.install_update(
                 self.download_url,
                 self.target_version,
+                self.checksum_sha256,
                 progress_callback=lambda pct, msg: self.progress.emit(pct, msg),
             )
         except Exception as e:
@@ -582,6 +584,7 @@ class DashboardPage(QWidget):
 
         target_version = self._latest_update_info.get("latest_version")
         download_url = (self._latest_update_info.get("download_url") or "").strip()
+        checksum_sha256 = (self._latest_update_info.get("checksum_sha256") or "").strip()
         if not target_version or not download_url:
             QMessageBox.warning(self, "Thiếu dữ liệu", "Không có link tải bản cập nhật từ server.")
             return
@@ -605,7 +608,7 @@ class DashboardPage(QWidget):
         self._set_update_progress(True, 5, "Khởi tạo cập nhật...")
         self.update_progress_text.setStyleSheet("font-size: 12px; color: #3B82F6;")
 
-        self._update_worker = UpdateInstallWorker(self.dashboard_mgr, download_url, target_version, self)
+        self._update_worker = UpdateInstallWorker(self.dashboard_mgr, download_url, target_version, checksum_sha256, self)
         self._update_worker.progress.connect(self._on_update_install_progress)
         self._update_worker.finished.connect(self._on_update_install_finished)
         self._update_worker.start()

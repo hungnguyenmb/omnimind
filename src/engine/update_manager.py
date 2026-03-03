@@ -3,16 +3,15 @@ import os
 import platform
 import re
 import shutil
+import hashlib
 import tarfile
 import tempfile
-import urllib.request
 import zipfile
 from pathlib import Path
 from typing import Callable, Optional
 
-import requests
-
 from engine.config_manager import ConfigManager
+from engine.http_client import request_with_retry
 
 logger = logging.getLogger(__name__)
 
@@ -85,7 +84,7 @@ class UpdateManager:
         current_version = (current_version or self.get_current_version()).strip()
         url = f"{api_base_url.rstrip('/')}/api/v1/omnimind/app/version"
         try:
-            response = requests.get(url, timeout=10)
+            response = request_with_retry("GET", url, timeout=10, max_attempts=4)
             if response.status_code != 200:
                 return {"success": False, "message": "Không nhận được phản hồi từ Server."}
 
@@ -99,6 +98,8 @@ class UpdateManager:
                 "latest_version": latest_version,
                 "version_name": data.get("version_name") or latest_version,
                 "download_url": data.get("download_url") or "",
+                "checksum_sha256": str(data.get("checksum_sha256") or data.get("checksum") or "").strip().lower(),
+                "package_size_bytes": data.get("package_size_bytes"),
                 "release_date": data.get("release_date") or "",
                 "changelogs": data.get("changelogs", []),
                 "is_critical": bool(data.get("is_critical", False)),
@@ -139,10 +140,14 @@ class UpdateManager:
         self,
         download_url: str,
         target_version: str,
+        expected_checksum: str = "",
         progress_callback: Optional[Callable[[int, str], None]] = None,
     ) -> dict:
         download_url = (download_url or "").strip()
         target_version = (target_version or "").strip()
+        expected_checksum = str(expected_checksum or "").strip().lower()
+        if expected_checksum.startswith("sha256:"):
+            expected_checksum = expected_checksum.split(":", 1)[1].strip()
         if not download_url:
             return {"success": False, "message": "Thiếu link tải bản cập nhật."}
         if not target_version:
@@ -155,22 +160,38 @@ class UpdateManager:
 
         try:
             self._emit_progress(progress_callback, 5, "Bắt đầu tải bản cập nhật...")
-            req = urllib.request.Request(download_url, headers={"User-Agent": "OmniMind-App"})
-            with urllib.request.urlopen(req) as response, open(archive_path, "wb") as out_file:
+            hasher = hashlib.sha256() if expected_checksum else None
+            with request_with_retry(
+                "GET",
+                download_url,
+                timeout=30,
+                max_attempts=4,
+                stream=True,
+                headers={"User-Agent": "OmniMind-App"},
+            ) as response, open(archive_path, "wb") as out_file:
+                if response.status_code != 200:
+                    raise RuntimeError(f"Tải gói update thất bại (HTTP {response.status_code}).")
                 total_size = int(response.headers.get("Content-Length", "0") or "0")
                 downloaded = 0
                 chunk_size = 1024 * 256
-                while True:
-                    chunk = response.read(chunk_size)
+                for chunk in response.iter_content(chunk_size=chunk_size):
                     if not chunk:
-                        break
+                        continue
                     out_file.write(chunk)
                     downloaded += len(chunk)
+                    if hasher:
+                        hasher.update(chunk)
                     if total_size > 0:
                         pct = 5 + int((downloaded / total_size) * 55)
                     else:
                         pct = min(60, 5 + int(downloaded / (1024 * 1024)))
                     self._emit_progress(progress_callback, pct, "Đang tải gói cập nhật...")
+
+            if hasher:
+                self._emit_progress(progress_callback, 62, "Đang xác minh checksum update...")
+                actual_checksum = hasher.hexdigest().lower()
+                if actual_checksum != expected_checksum:
+                    raise RuntimeError("Checksum update không khớp. Đã huỷ cài đặt để đảm bảo an toàn.")
 
             self._emit_progress(progress_callback, 65, "Đang giải nén gói cập nhật...")
             if zipfile.is_zipfile(archive_path):
@@ -197,10 +218,17 @@ class UpdateManager:
                 shutil.rmtree(final_dir, ignore_errors=True)
             target_tmp_dir.rename(final_dir)
 
+            prev_payload_path = ConfigManager.get("app_payload_path", "").strip()
+            prev_payload_version = ConfigManager.get("app_payload_version", "").strip()
             ConfigManager.set("app_payload_path", str(final_dir))
             ConfigManager.set("app_payload_version", target_version)
             ConfigManager.set("app_current_version", target_version)
             ConfigManager.set("app_update_pending_restart", "true")
+            ConfigManager.set("app_payload_prev_path", prev_payload_path)
+            ConfigManager.set("app_payload_prev_version", prev_payload_version)
+            ConfigManager.set("app_payload_boot_status", "pending")
+            ConfigManager.set("app_payload_boot_attempts", "0")
+            ConfigManager.set("app_payload_last_error", "")
 
             self._cleanup_old_payloads(target_version)
             self._emit_progress(progress_callback, 100, "Cài đặt bản cập nhật thành công.")
@@ -208,6 +236,7 @@ class UpdateManager:
                 "success": True,
                 "version": target_version,
                 "payload_path": str(final_dir),
+                "checksum_verified": bool(expected_checksum),
             }
         except Exception as e:
             logger.error(f"Install update failed: {e}")

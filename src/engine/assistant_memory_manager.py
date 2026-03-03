@@ -254,6 +254,21 @@ class AssistantMemoryManager:
             return None
         return dict(row)
 
+    def get_recent_summaries(self, limit: int = 4) -> list[dict[str, Any]]:
+        take = max(1, min(100, int(limit or 4)))
+        rows = db.fetch_all(
+            """
+            SELECT id, summary_text, from_message_id, to_message_id, source, created_at
+            FROM memory_summaries
+            ORDER BY id DESC
+            LIMIT ?
+            """,
+            (take,),
+        )
+        out = [dict(r) for r in rows]
+        out.reverse()
+        return out
+
     def _extract_fact_candidates(self, text: str) -> list[tuple[str, float]]:
         body = str(text or "").strip()
         if not body:

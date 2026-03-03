@@ -186,7 +186,7 @@ class CodexRuntimeBridge:
         cmd = self._build_command(prompt_text)
         cwd = self._resolve_workspace()
         env = self.env_manager.get_codex_env()
-        self._emit_event(runtime_event_callback, {"kind": "status", "text": "Đang kết nối Codex app-server..."})
+        self._emit_event(runtime_event_callback, {"kind": "status", "text": "Đang kết nối OmniMind app-server..."})
 
         proc = subprocess.Popen(
             cmd,
@@ -285,7 +285,7 @@ class CodexRuntimeBridge:
                     last_agent = self._clean_chunk(ev.get("last_agent_message", ""))
                     if last_agent:
                         final_text = last_agent
-                    _emit("status", "Codex đã hoàn tất lượt xử lý.", raw=msg)
+                    _emit("status", "OmniMind đã hoàn tất lượt xử lý.", raw=msg)
                     return True
 
                 if ev_type in {"error", "stream_error"}:
@@ -365,7 +365,7 @@ class CodexRuntimeBridge:
                     )
                     if last_agent:
                         final_text = last_agent
-                    _emit("status", "Codex đã hoàn tất lượt xử lý.", raw=msg)
+                    _emit("status", "OmniMind đã hoàn tất lượt xử lý.", raw=msg)
                     return True
 
                 return False
@@ -409,7 +409,7 @@ class CodexRuntimeBridge:
                 return False
 
             if method in {"turn/completed"}:
-                _emit("status", "Codex đã hoàn tất lượt xử lý.", raw=msg)
+                _emit("status", "OmniMind đã hoàn tất lượt xử lý.", raw=msg)
                 return True
 
             if method == "runtime/stderr":
@@ -519,7 +519,7 @@ class CodexRuntimeBridge:
                 ),
             )
             self._wait_for_response(proc, msg_queue, listen_req, timeout_sec=8)
-            self._emit_event(runtime_event_callback, {"kind": "status", "text": "Đang gửi yêu cầu cho Codex..."})
+            self._emit_event(runtime_event_callback, {"kind": "status", "text": "Đang gửi yêu cầu cho OmniMind..."})
 
             # send user message
             send_req = self._next_request_id()
@@ -582,7 +582,7 @@ class CodexRuntimeBridge:
         env = self.env_manager.get_codex_env()
         started_at = time.monotonic()
         chunks: list[str] = []
-        self._emit_event(runtime_event_callback, {"kind": "status", "text": "Đang chạy Codex fallback exec..."})
+        self._emit_event(runtime_event_callback, {"kind": "status", "text": "Đang chạy OmniMind fallback exec..."})
 
         try:
             proc = subprocess.Popen(
@@ -596,9 +596,9 @@ class CodexRuntimeBridge:
                 bufsize=1,
             )
         except FileNotFoundError:
-            return {"success": False, "message": "Không tìm thấy lệnh codex.", "output": ""}
+            return {"success": False, "message": "Không tìm thấy OmniMind CLI (`codex`).", "output": ""}
         except Exception as e:
-            return {"success": False, "message": f"Không thể khởi chạy Codex: {e}", "output": ""}
+            return {"success": False, "message": f"Không thể khởi chạy OmniMind: {e}", "output": ""}
 
         try:
             stream = proc.stdout
@@ -606,7 +606,7 @@ class CodexRuntimeBridge:
                 while True:
                     if time.monotonic() - started_at > max(30, int(timeout_sec)):
                         proc.kill()
-                        return {"success": False, "message": "Codex xử lý quá thời gian chờ.", "output": "".join(chunks)}
+                        return {"success": False, "message": "OmniMind xử lý quá thời gian chờ.", "output": "".join(chunks)}
 
                     line = stream.readline()
                     if line == "" and proc.poll() is not None:
@@ -626,18 +626,18 @@ class CodexRuntimeBridge:
             return_code = proc.wait(timeout=3)
             output = "".join(chunks).strip()
             if return_code != 0:
-                message = output or f"Codex trả về mã lỗi {return_code}."
+                message = output or f"OmniMind trả về mã lỗi {return_code}."
                 return {"success": False, "message": message, "output": output}
             return {"success": True, "message": "OK", "output": output, "mode": "exec"}
         except subprocess.TimeoutExpired:
             proc.kill()
-            return {"success": False, "message": "Codex không phản hồi khi kết thúc tiến trình.", "output": "".join(chunks)}
+            return {"success": False, "message": "OmniMind không phản hồi khi kết thúc tiến trình.", "output": "".join(chunks)}
         except Exception as e:
             try:
                 proc.kill()
             except Exception:
                 pass
-            return {"success": False, "message": f"Lỗi runtime Codex: {e}", "output": "".join(chunks)}
+            return {"success": False, "message": f"Lỗi runtime OmniMind: {e}", "output": "".join(chunks)}
 
     def stream_reply(
         self,
@@ -654,7 +654,7 @@ class CodexRuntimeBridge:
         if not auth_status.get("success"):
             return {
                 "success": False,
-                "message": auth_status.get("message", "Codex chưa sẵn sàng xác thực."),
+                "message": auth_status.get("message", "OmniMind chưa sẵn sàng xác thực."),
                 "output": "",
             }
 

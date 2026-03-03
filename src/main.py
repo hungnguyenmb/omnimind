@@ -9,6 +9,7 @@ import logging
 import sqlite3
 import platform
 from pathlib import Path
+from logging.handlers import RotatingFileHandler
 from PyQt5.QtWidgets import QApplication
 from PyQt5.QtCore import Qt
 
@@ -73,6 +74,54 @@ def _set_config_value_raw(key: str, value: str):
             pass
 
 
+def _configure_runtime_logging():
+    """
+    Bật logging tập trung vào file runtime để dễ monitoring + rollback điều tra.
+    """
+    try:
+        db_path = _get_local_db_path()
+        data_dir = db_path.parent
+        app_root = data_dir.parent if data_dir.name == "data" else data_dir
+        logs_dir = app_root / "logs"
+        logs_dir.mkdir(parents=True, exist_ok=True)
+        log_file = logs_dir / "omnimind_app.log"
+
+        root = logging.getLogger()
+        has_file_handler = any(
+            isinstance(h, RotatingFileHandler) and getattr(h, "baseFilename", "").endswith("omnimind_app.log")
+            for h in root.handlers
+        )
+        if not has_file_handler:
+            fh = RotatingFileHandler(str(log_file), maxBytes=8 * 1024 * 1024, backupCount=5, encoding="utf-8")
+            fh.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] [%(name)s] %(message)s"))
+            fh.setLevel(logging.INFO)
+            root.addHandler(fh)
+        root.setLevel(logging.INFO)
+    except Exception as e:
+        logger.warning(f"Cannot setup runtime file logging: {e}")
+
+
+def _rollback_to_previous_payload(reason: str):
+    default_version = os.environ.get("OMNIMIND_APP_VERSION", "1.0.0")
+    prev_path = _read_config_value_raw("app_payload_prev_path", "").strip()
+    prev_version = _read_config_value_raw("app_payload_prev_version", "").strip()
+    restored = False
+    if prev_path and (Path(prev_path).expanduser() / "src").is_dir():
+        _set_config_value_raw("app_payload_path", prev_path)
+        _set_config_value_raw("app_payload_version", prev_version)
+        _set_config_value_raw("app_current_version", prev_version or default_version)
+        restored = True
+    else:
+        _set_config_value_raw("app_payload_path", "")
+        _set_config_value_raw("app_payload_version", "")
+        _set_config_value_raw("app_current_version", default_version)
+    _set_config_value_raw("app_update_pending_restart", "false")
+    _set_config_value_raw("app_payload_boot_status", "rolled_back")
+    _set_config_value_raw("app_payload_boot_attempts", "0")
+    _set_config_value_raw("app_payload_last_error", str(reason or "payload_boot_failed"))
+    logger.warning(f"Rollback payload update: restored_previous={restored}, reason={reason}")
+
+
 def _bootstrap_update_overlay():
     """
     Load payload update từ thư mục dữ liệu user (nếu có) trước khi import phần còn lại.
@@ -83,11 +132,25 @@ def _bootstrap_update_overlay():
         payload_version = _read_config_value_raw("app_payload_version", "").strip()
         current_version = _read_config_value_raw("app_current_version", "").strip()
         default_version = os.environ.get("OMNIMIND_APP_VERSION", "1.0.0")
+        boot_status = _read_config_value_raw("app_payload_boot_status", "").strip().lower()
+        try:
+            boot_attempts = int(_read_config_value_raw("app_payload_boot_attempts", "0") or 0)
+        except Exception:
+            boot_attempts = 0
 
         if not payload_path:
             if not current_version:
                 _set_config_value_raw("app_current_version", default_version)
             return
+
+        # Nếu payload đang pending mà đã từng thử boot >= 1 lần, coi như payload lỗi boot.
+        if boot_status == "pending" and boot_attempts >= 1:
+            _rollback_to_previous_payload("payload_boot_failed_previous_launch")
+            payload_path = _read_config_value_raw("app_payload_path", "").strip()
+            payload_version = _read_config_value_raw("app_payload_version", "").strip()
+            if not payload_path:
+                return
+            boot_status = _read_config_value_raw("app_payload_boot_status", "").strip().lower()
 
         src_dir = Path(payload_path).expanduser() / "src"
         if not src_dir.is_dir():
@@ -98,6 +161,9 @@ def _bootstrap_update_overlay():
             if not current_version:
                 _set_config_value_raw("app_current_version", default_version)
             return
+
+        if boot_status == "pending":
+            _set_config_value_raw("app_payload_boot_attempts", str(max(0, boot_attempts) + 1))
 
         src_path = str(src_dir)
         if src_path not in sys.path:
@@ -111,9 +177,34 @@ def _bootstrap_update_overlay():
         logger.warning(f"Update overlay bootstrap warning: {e}")
 
 
+def _mark_payload_boot_success():
+    try:
+        status = _read_config_value_raw("app_payload_boot_status", "").strip().lower()
+        if status != "pending":
+            return
+        _set_config_value_raw("app_payload_boot_status", "active")
+        _set_config_value_raw("app_payload_boot_attempts", "0")
+        _set_config_value_raw("app_payload_last_error", "")
+        logger.info("Payload update marked as active after successful boot.")
+    except Exception as e:
+        logger.warning(f"Cannot mark payload boot success: {e}")
+
+
+def _consume_minimized_flag(argv: list[str]) -> tuple[list[str], bool]:
+    cleaned = []
+    minimized = False
+    for arg in argv:
+        if arg == "--minimized":
+            minimized = True
+            continue
+        cleaned.append(arg)
+    return cleaned, minimized
+
+
 def main():
     # Đồng bộ DB path ổn định trước khi import các module có thể khởi tạo DB singleton.
     os.environ["OMNIMIND_DB_PATH"] = str(_get_local_db_path())
+    _configure_runtime_logging()
     _bootstrap_update_overlay()
 
     # Chuẩn hóa CODEX_HOME ngay khi app khởi động để các module dùng cùng 1 path skills/auth.
@@ -124,7 +215,9 @@ def main():
     QApplication.setAttribute(Qt.AA_EnableHighDpiScaling, True)
     QApplication.setAttribute(Qt.AA_UseHighDpiPixmaps, True)
 
-    app = QApplication(sys.argv)
+    qt_argv, start_minimized = _consume_minimized_flag(sys.argv)
+    app = QApplication(qt_argv)
+    app.setQuitOnLastWindowClosed(False)
     app.setStyle("Fusion")
     from engine.telegram_bot_service import stop_global_telegram_bot_service
     app.aboutToQuit.connect(stop_global_telegram_bot_service)
@@ -152,10 +245,22 @@ def main():
             # Người dùng đóng popup mà không kích hoạt → Thoát app
             sys.exit(0)
 
+    # Đồng bộ entitlement ngay khi mở app để plan/expiry/purchased skills luôn mới.
+    try:
+        license_key = license_mgr.get_saved_license()
+        if license_key:
+            license_mgr.sync_entitlements(license_key)
+    except Exception as e:
+        print(f"[OmniMind] Warning: Entitlement sync failed: {e}")
+
     # ── Main Application ──
     from ui.main_window import MainWindow
     window = MainWindow()
-    window.show()
+    if start_minimized:
+        window.hide()
+    else:
+        window.show()
+    _mark_payload_boot_success()
 
     sys.exit(app.exec_())
 

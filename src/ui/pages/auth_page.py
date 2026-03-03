@@ -1,6 +1,6 @@
 """
 OmniMind - Tab 2: Auth & Core Settings Page
-Form Token Telegram, Workspace Path, Codex Config, Auto-start.
+Form Token Telegram, Workspace Path, OmniMind Config, Auto-start.
 """
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
@@ -117,7 +117,7 @@ class CodexInstallWorker(QThread):
                 self.finished.emit({
                     "success": False,
                     "message": (
-                        "HĐH/kiến trúc máy chưa có gói Codex phù hợp "
+                        "HĐH/kiến trúc máy chưa có gói OmniMind phù hợp "
                         f"({release_data.get('platform', 'unknown')}/{release_data.get('arch', 'unknown')})."
                     ),
                 })
@@ -130,11 +130,11 @@ class CodexInstallWorker(QThread):
             )
             self.finished.emit({
                 "success": bool(ok),
-                "message": "Cài đặt Codex thành công." if ok else "Không tải/cài được Codex CLI.",
+                "message": "Cài đặt OmniMind thành công." if ok else "Không tải/cài được OmniMind CLI.",
             })
         except Exception as e:
             logger.exception("Codex install worker failed")
-            self.finished.emit({"success": False, "message": f"Lỗi cài Codex: {str(e)[:80]}"})
+            self.finished.emit({"success": False, "message": f"Lỗi cài OmniMind: {str(e)[:80]}"})
 
 
 class AuthPage(QWidget):
@@ -187,7 +187,7 @@ class AuthPage(QWidget):
         h_layout.setSpacing(4)
         title = QLabel("Xác Thực & Cấu Hình")
         title.setObjectName("PageTitle")
-        desc = QLabel("Cấu hình Telegram Bot, Workspace, xác thực Codex CLI và các tuỳ chọn hệ thống.")
+        desc = QLabel("Cấu hình Telegram Bot, Workspace, xác thực OmniMind CLI và các tuỳ chọn hệ thống.")
         desc.setObjectName("PageDesc")
         desc.setWordWrap(True)
         h_layout.addWidget(title)
@@ -258,8 +258,8 @@ class AuthPage(QWidget):
 
         layout.addWidget(ws_card)
 
-        # ── Codex CLI Authentication Card ──
-        codex_card = self._create_card("🧠  Xác thực Codex CLI")
+        # ── OmniMind CLI Authentication Card ──
+        codex_card = self._create_card("🧠  Xác thực OmniMind CLI")
         codex_layout = codex_card.layout()
 
         # Status indicator
@@ -273,7 +273,7 @@ class AuthPage(QWidget):
         status_row.addWidget(self.codex_status_label)
         status_row.addStretch()
 
-        # Nút "Tải bộ não AI" (ẩn mặc định, hiện khi chưa cài Codex)
+        # Nút "Tải bộ não AI" (ẩn mặc định, hiện khi chưa cài OmniMind)
         self.codex_download_btn = QPushButton("  Tải bộ não AI")
         self.codex_download_btn.setObjectName("PrimaryBtn")
         self.codex_download_btn.setIcon(Icons.download("#FFFFFF", 16))
@@ -284,7 +284,7 @@ class AuthPage(QWidget):
         self.codex_download_btn.setVisible(False)
         status_row.addWidget(self.codex_download_btn)
 
-        # Nút "Xác thực tài khoản" (ẩn mặc định, hiện khi đã cài Codex)
+        # Nút "Xác thực tài khoản" (ẩn mặc định, hiện khi đã cài OmniMind)
         self.codex_verify_btn = QPushButton("  Xác thực tài khoản")
         self.codex_verify_btn.setObjectName("PrimaryBtn")
         self.codex_verify_btn.setIcon(Icons.check_circle("#FFFFFF", 16))
@@ -353,8 +353,8 @@ class AuthPage(QWidget):
 
         layout.addWidget(codex_card)
 
-        # ── Codex CLI Config Card ──
-        codex_cfg_card = self._create_card("Cấu hình Codex CLI")
+        # ── OmniMind CLI Config Card ──
+        codex_cfg_card = self._create_card("Cấu hình OmniMind CLI")
         codex_cfg_layout = codex_cfg_card.layout()
 
         codex_cfg_layout.addWidget(self._create_field_label("Model"))
@@ -711,7 +711,7 @@ class AuthPage(QWidget):
         ok = self._confirm_privileged_action(
             f"Cài đặt {friendly}",
             (
-                f"Hệ thống cần cài {friendly} để Codex CLI hoạt động.\n\n"
+                f"Hệ thống cần cài {friendly} để OmniMind CLI hoạt động.\n\n"
                 "Tiến trình có thể yêu cầu quyền quản trị (Admin/UAC/Sudo).\n"
                 "Nhấn OK để tiếp tục, hoặc Cancel để huỷ."
             ),
@@ -755,10 +755,10 @@ class AuthPage(QWidget):
         self.codex_download_btn.setText("  Đang tải...")
         self.codex_verify_btn.setEnabled(False)
         self.codex_status_icon.setText("🟡")
-        self.codex_status_label.setText("Đang tải và cài đặt Codex CLI...")
+        self.codex_status_label.setText("Đang tải và cài đặt OmniMind CLI...")
         self.codex_status_label.setStyleSheet("font-size: 14px; font-weight: 600; color: #3B82F6;")
         self.codex_hint.setText("Đang xử lý. Bạn có thể theo dõi tiến trình bên dưới.")
-        self._set_progress(True, 5, "Khởi tạo cài đặt Codex...")
+        self._set_progress(True, 5, "Khởi tạo cài đặt OmniMind...")
         self._show_missing_runtime_actions(runtime_missing)
 
         self._codex_install_worker = CodexInstallWorker(self.env_manager, release_manifest, self)
@@ -787,7 +787,7 @@ class AuthPage(QWidget):
                 self._auto_install_codex_after_runtime = False
                 codex_ready = env_status.get("codex_ready", env_status.get("codex") == "OK")
                 if codex_ready:
-                    self._set_progress(True, 100, "Runtime đã đầy đủ. Codex đã được cài.")
+                    self._set_progress(True, 100, "Runtime đã đầy đủ. OmniMind đã được cài.")
                     self._pending_codex_manifest = None
                     self._check_codex_installed()
                     return
@@ -795,7 +795,7 @@ class AuthPage(QWidget):
                 self._pending_codex_manifest = None
                 self._start_codex_install(manifest, missing_runtime)
                 return
-            self._set_progress(True, 100, "Đã hoàn tất. Bạn có thể tiếp tục tải Codex.")
+            self._set_progress(True, 100, "Đã hoàn tất. Bạn có thể tiếp tục tải OmniMind.")
         else:
             self.codex_status_icon.setText("🔴")
             self.codex_status_label.setText(result.get("message", "Cài đặt môi trường thất bại."))
@@ -897,14 +897,14 @@ class AuthPage(QWidget):
             if write_result.get("success"):
                 self.codex_cfg_hint.setStyleSheet("font-size: 12px; color: #10B981;")
                 self.codex_cfg_hint.setText(
-                    f"Đã lưu cấu hình Codex CLI: {write_result.get('config_path', '~/.codex/config.toml')}"
+                    f"Đã lưu cấu hình OmniMind CLI: {write_result.get('config_path', '~/.codex/config.toml')}"
                 )
             else:
                 self.codex_cfg_hint.setStyleSheet("font-size: 12px; color: #EF4444;")
                 self.codex_cfg_hint.setText(write_result.get("message", "Không thể ghi config.toml"))
                 QMessageBox.warning(
                     self,
-                    "Lưu cấu hình Codex",
+                    "Lưu cấu hình OmniMind",
                     write_result.get("message", "Không thể ghi ~/.codex/config.toml"),
                 )
 
@@ -925,7 +925,7 @@ class AuthPage(QWidget):
         self.save_btn.setEnabled(True)
 
     def _check_codex_installed(self):
-        """Tự động kiểm tra môi trường và Codex CLI khi khởi động."""
+        """Tự động kiểm tra môi trường và OmniMind CLI khi khởi động."""
         if self.env_manager is None:
             self.codex_status_icon.setText("🔴")
             self.codex_status_label.setText("Lỗi khởi tạo Environment Manager")
@@ -978,7 +978,7 @@ class AuthPage(QWidget):
                 self.codex_verify_btn.setVisible(True)
                 self.codex_download_btn.setVisible(False)
                 self.codex_hint.setText(
-                    "Codex CLI đã sẵn sàng. Nhấn xác thực để kiểm tra tài khoản."
+                    "OmniMind CLI đã sẵn sàng. Nhấn xác thực để kiểm tra tài khoản."
                     f"{runtime_warn}"
                 )
         else:
@@ -986,9 +986,11 @@ class AuthPage(QWidget):
             self.codex_status_icon.setText("🔴")
             missing = [k for k in ("python", "node", "npm", "codex") if env_status.get(k) == "MISSING"]
             if missing:
-                self.codex_status_label.setText(f"Thiếu môi trường: {', '.join(missing)}")
+                name_map = {"python": "Python", "node": "Node.js", "npm": "npm", "codex": "OmniMind CLI"}
+                pretty_missing = ", ".join(name_map.get(x, x) for x in missing)
+                self.codex_status_label.setText(f"Thiếu môi trường: {pretty_missing}")
             else:
-                self.codex_status_label.setText("Chưa cài đặt Codex CLI")
+                self.codex_status_label.setText("Chưa cài đặt OmniMind CLI")
                 
             self.codex_status_label.setStyleSheet("font-size: 14px; font-weight: 600; color: #EF4444;")
             self.codex_download_btn.setVisible(True)
@@ -997,11 +999,11 @@ class AuthPage(QWidget):
             if runtime_missing:
                 hint_txt = (
                     "Nhấn \"Tải bộ não AI\" để hệ thống tự động cài runtime còn thiếu (Python/Node/npm),"
-                    " sau đó tải Codex CLI."
+                    " sau đó tải OmniMind CLI."
                 )
             else:
                 hint_txt = (
-                    "Runtime đã đủ. Nhấn \"Tải bộ não AI\" để bắt đầu tải và cài Codex CLI."
+                    "Runtime đã đủ. Nhấn \"Tải bộ não AI\" để bắt đầu tải và cài OmniMind CLI."
                 )
             self.codex_hint.setText(hint_txt)
 
@@ -1009,7 +1011,7 @@ class AuthPage(QWidget):
             self._set_progress(False)
 
     def _download_codex(self):
-        """Ưu tiên cài Codex trước; runtime thiếu được coi là thành phần bổ sung."""
+        """Ưu tiên cài OmniMind trước; runtime thiếu được coi là thành phần bổ sung."""
         if not self.env_manager or self._runtime_installing or self._codex_installing:
             return
 
@@ -1026,31 +1028,31 @@ class AuthPage(QWidget):
         if runtime_missing:
             missing_text = ", ".join(self._runtime_display_name(k) for k in runtime_missing)
             self.codex_hint.setText(
-                f"Đang thiếu runtime: {missing_text}. Codex vẫn sẽ được cài trước; runtime có thể cài bổ sung sau."
+                f"Đang thiếu runtime: {missing_text}. OmniMind vẫn sẽ được cài trước; runtime có thể cài bổ sung sau."
             )
 
         if codex_ready:
             self.codex_status_icon.setText("🟢")
-            self.codex_status_label.setText("Codex đã được cài đặt")
+            self.codex_status_label.setText("OmniMind đã được cài đặt")
             self.codex_status_label.setStyleSheet("font-size: 14px; font-weight: 600; color: #10B981;")
             if runtime_missing:
                 missing_text = ", ".join(self._runtime_display_name(k) for k in runtime_missing)
                 self.codex_hint.setText(
-                    f"Codex CLI đã có sẵn. Runtime bổ sung còn thiếu: {missing_text}. "
+                    f"OmniMind CLI đã có sẵn. Runtime bổ sung còn thiếu: {missing_text}. "
                     "Bạn có thể cài sau bằng các nút bên dưới."
                 )
             else:
-                self.codex_hint.setText("Codex CLI đã có sẵn. Bạn có thể nhấn xác thực tài khoản.")
+                self.codex_hint.setText("OmniMind CLI đã có sẵn. Bạn có thể nhấn xác thực tài khoản.")
             self.codex_download_btn.setVisible(False)
             self.codex_verify_btn.setVisible(True)
             self._set_progress(False)
             return
 
         ok = self._confirm_privileged_action(
-            "Tải bộ não AI (Codex CLI)",
+            "Tải bộ não AI (OmniMind CLI)",
             (
-                "Ứng dụng sẽ tải và cài Codex CLI vào máy.\n\n"
-                "Codex CLI được ưu tiên cài trước. Runtime bổ sung sẽ cài sau nếu cần.\n"
+                "Ứng dụng sẽ tải và cài OmniMind CLI vào máy.\n\n"
+                "OmniMind CLI được ưu tiên cài trước. Runtime bổ sung sẽ cài sau nếu cần.\n"
                 "Tiến trình có thể yêu cầu quyền hệ thống trên một số môi trường.\n"
                 "Nhấn OK để tiếp tục hoặc Cancel để dừng."
             ),
@@ -1070,10 +1072,10 @@ class AuthPage(QWidget):
         if result.get("success"):
             self._on_download_complete()
         else:
-            self._on_download_failed(result.get("message", "Không tải/cài được Codex CLI."))
+            self._on_download_failed(result.get("message", "Không tải/cài được OmniMind CLI."))
 
     def _on_download_complete(self):
-        """Callback sau khi tải Codex xong."""
+        """Callback sau khi tải OmniMind xong."""
         try:
             env_status = self.env_manager.check_prerequisites() if self.env_manager else {}
         except Exception:
@@ -1081,7 +1083,7 @@ class AuthPage(QWidget):
         runtime_missing = [k for k in ("python", "node", "npm") if env_status.get(k) == "MISSING"]
         self._show_missing_runtime_actions(runtime_missing)
 
-        self._set_progress(True, 100, "Cài đặt Codex hoàn tất.")
+        self._set_progress(True, 100, "Cài đặt OmniMind hoàn tất.")
         self.codex_download_btn.setEnabled(True)
         self.codex_download_btn.setText("  Tải bộ não AI")
         self.codex_download_btn.setVisible(False)
@@ -1093,14 +1095,14 @@ class AuthPage(QWidget):
         if runtime_missing:
             missing_text = ", ".join(self._runtime_display_name(k) for k in runtime_missing)
             self.codex_hint.setText(
-                f"Cài đặt Codex thành công. Runtime bổ sung còn thiếu: {missing_text}. "
+                f"Cài đặt OmniMind thành công. Runtime bổ sung còn thiếu: {missing_text}. "
                 "Bạn có thể cài sau bằng các nút bên dưới."
             )
         else:
-            self.codex_hint.setText("Cài đặt thành công! Nhấn xác thực để đăng nhập tài khoản Codex.")
+            self.codex_hint.setText("Cài đặt thành công! Nhấn xác thực để đăng nhập tài khoản OmniMind.")
 
     def _on_download_failed(self, msg: str):
-        """Reset UI đúng trạng thái khi tải/cài Codex lỗi."""
+        """Reset UI đúng trạng thái khi tải/cài OmniMind lỗi."""
         self._set_progress(True, 100, "Tiến trình dừng do lỗi.")
         self.codex_download_btn.setEnabled(True)
         self.codex_download_btn.setText("  Tải bộ não AI")
@@ -1108,7 +1110,7 @@ class AuthPage(QWidget):
         self.codex_status_icon.setText("🔴")
         self.codex_status_label.setText(msg)
         self.codex_status_label.setStyleSheet("font-size: 14px; font-weight: 600; color: #EF4444;")
-        self.codex_hint.setText("Không thể hoàn tất cài đặt Codex. Vui lòng kiểm tra mạng/quyền hệ thống và thử lại.")
+        self.codex_hint.setText("Không thể hoàn tất cài đặt OmniMind. Vui lòng kiểm tra mạng/quyền hệ thống và thử lại.")
 
         try:
             env_status = self.env_manager.check_prerequisites() if self.env_manager else {}
@@ -1122,7 +1124,7 @@ class AuthPage(QWidget):
         self.codex_verify_btn.setVisible(codex_ready)
 
     def _verify_codex(self):
-        """Kiểm tra xác thực Codex CLI sử dụng EnvironmentManager."""
+        """Kiểm tra xác thực OmniMind CLI sử dụng EnvironmentManager."""
         if self.env_manager is None:
             logger.error("AuthPage: env_manager is None during _verify_codex")
             self._set_codex_error("Cấu trúc môi trường lỗi")
@@ -1130,10 +1132,10 @@ class AuthPage(QWidget):
         if self._verify_worker and self._verify_worker.isRunning():
             return
 
-        logger.info("Starting Codex verification...")
+        logger.info("Starting OmniMind verification...")
         self.codex_verify_btn.setEnabled(False)
         self.codex_status_icon.setText("🟡")
-        self.codex_status_label.setText("Đang xác thực tài khoản Codex...")
+        self.codex_status_label.setText("Đang xác thực tài khoản OmniMind...")
         self.codex_status_label.setStyleSheet("font-size: 14px; font-weight: 600; color: #3B82F6;")
         self.codex_hint.setText("Đang kiểm tra trạng thái đăng nhập, vui lòng chờ.")
 
@@ -1142,7 +1144,7 @@ class AuthPage(QWidget):
         self._verify_worker.start()
 
     def _on_verify_finished(self, result: dict):
-        logger.info(f"Codex verify result: {result}")
+        logger.info(f"OmniMind verify result: {result}")
         self.codex_verify_btn.setEnabled(True)
         self._verify_worker = None
 
@@ -1165,7 +1167,7 @@ class AuthPage(QWidget):
         
         self.codex_verify_btn.setVisible(True)
         self.codex_logout_btn.setVisible(True)
-        self.codex_hint.setText("Codex CLI đã xác thực thành công. Sẵn sàng sử dụng.")
+        self.codex_hint.setText("OmniMind CLI đã xác thực thành công. Sẵn sàng sử dụng.")
         
         # Lưu trạng thái vào Database
         ConfigManager.set("codex_auth_status", "verified")
@@ -1209,7 +1211,7 @@ class AuthPage(QWidget):
             self.codex_status_label.setText(result.get("message", "Đăng xuất thất bại"))
             self.codex_status_label.setStyleSheet("font-size: 14px; font-weight: 600; color: #EF4444;")
             self.codex_logout_btn.setVisible(True)
-            self.codex_hint.setText("Không thể đăng xuất Codex CLI. Vui lòng thử lại.")
+            self.codex_hint.setText("Không thể đăng xuất OmniMind CLI. Vui lòng thử lại.")
             return
 
         self.codex_status_icon.setText("🟡")
@@ -1362,6 +1364,7 @@ class AuthPage(QWidget):
                             <string>/usr/bin/env</string>
                             <string>python3</string>
                             <string>{app_path}</string>
+                            <string>--minimized</string>
                         </array>
                         <key>RunAtLoad</key>
                         <true/>
@@ -1420,10 +1423,10 @@ class AuthPage(QWidget):
                     # Nếu chạy binary đóng gói: dùng chính executable.
                     # Nếu chạy source: lưu command đầy đủ gồm Python + main.py.
                     if getattr(sys, "frozen", False):
-                        cmd = f'"{sys.executable}"'
+                        cmd = f'"{sys.executable}" --minimized'
                     else:
                         main_py = Path(__file__).resolve().parents[2] / "main.py"
-                        cmd = f'"{sys.executable}" "{main_py}"'
+                        cmd = f'"{sys.executable}" "{main_py}" --minimized'
                     winreg.SetValueEx(key, "OmniMind", 0, winreg.REG_SZ, cmd)
                     logger.info("Auto-start enabled for Windows via Registry.")
                 else:

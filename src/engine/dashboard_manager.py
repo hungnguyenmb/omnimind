@@ -14,17 +14,29 @@ class DashboardManager:
     """
 
     def __init__(self):
-        self.api_base_url = ConfigManager.get("OMNIMIND_API_URL", "http://localhost:8050")
+        self.api_base_url = ConfigManager.get_api_base_url()
         self.update_mgr = UpdateManager()
 
     def get_license_display_info(self) -> dict:
         """Lấy thông tin bản quyền để hiển thị trên Dashboard."""
-        is_activated = bool(ConfigManager.get("license_key"))
-        status_dot = '<span style="color: #10B981;">●</span>' if is_activated else '<span style="color: #EF4444;">●</span>'
-        status_text = "Đã kích hoạt" if is_activated else "Chưa kích hoạt"
+        key = ConfigManager.get("license_key", "")
+        status = str(ConfigManager.get("license_status", "")).strip().lower()
+        is_activated = bool(key and status in {"active", "ok", "valid"})
+        if not status and key:
+            is_activated = True
+
+        if is_activated:
+            status_dot = '<span style="color: #10B981;">●</span>'
+            status_text = "Đang hoạt động"
+        elif key:
+            status_dot = '<span style="color: #F59E0B;">●</span>'
+            status_text = f"Không hoạt động ({status or 'unknown'})"
+        else:
+            status_dot = '<span style="color: #EF4444;">●</span>'
+            status_text = "Chưa kích hoạt"
         
         return {
-            "key": ConfigManager.get("license_key", "Chưa kích hoạt"),
+            "key": key or "Chưa kích hoạt",
             "plan": ConfigManager.get("license_plan", "N/A"),
             "expires_at": ConfigManager.get("license_expires", "N/A"),
             "status": f"{status_dot} {status_text}"
@@ -40,10 +52,17 @@ class DashboardManager:
         """
         return self.update_mgr.check_for_updates(self.api_base_url, current_version)
 
-    def install_update(self, download_url: str, target_version: str, progress_callback=None) -> dict:
+    def install_update(
+        self,
+        download_url: str,
+        target_version: str,
+        expected_checksum: str = "",
+        progress_callback=None,
+    ) -> dict:
         return self.update_mgr.download_and_install_update(
             download_url=download_url,
             target_version=target_version,
+            expected_checksum=expected_checksum,
             progress_callback=progress_callback,
         )
 

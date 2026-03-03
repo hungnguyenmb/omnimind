@@ -148,7 +148,7 @@ class MemoryPage(QWidget):
         profile_layout.addWidget(profile_title)
 
         profile_desc = QLabel(
-            "Thông tin này sẽ được inject vào prompt để Codex hiểu cách xưng hô và phong cách phản hồi mong muốn."
+            "Thông tin này sẽ được inject vào prompt để OmniMind hiểu cách xưng hô và phong cách phản hồi mong muốn."
         )
         profile_desc.setStyleSheet("font-size: 12px; color: #64748B;")
         profile_desc.setWordWrap(True)
@@ -252,7 +252,7 @@ class MemoryPage(QWidget):
             self.assistant_persona_input.setPlainText(str(profile.get("persona_prompt") or ""))
         if self.assistant_hint is not None:
             self.assistant_hint.setText(
-                "Đã nạp hồ sơ trợ lý từ SQLite. Nội dung sẽ được inject vào prompt Telegram/Codex."
+                "Đã nạp hồ sơ trợ lý từ SQLite. Nội dung sẽ được inject vào prompt Telegram/OmniMind."
             )
 
     def _save_profile(self):

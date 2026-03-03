@@ -83,6 +83,8 @@ GET /api/v1/omnimind/app/version
   "version_name": "Phoenix Update",
   "is_critical": false,
   "download_url": "https://.../payload.zip",
+  "checksum_sha256": "5e2611e630394f9a31042ad044c4f708f497b36643cdd3be93cfd0f147ae59c6",
+  "package_size_bytes": 396000000,
   "release_date": "2026-02-28T10:00:00.000Z",
   "changelogs": [
     { "change_type": "feat", "content": "..." }
@@ -155,6 +157,7 @@ GET /api/v1/omnimind/skills
       "description": "...",
       "skill_type": "KNOWLEDGE",
       "price": 0,
+      "effective_price": 0,
       "author": "OmniMind Team",
       "version": "1.0.0",
       "is_vip": false,
@@ -170,7 +173,18 @@ GET /api/v1/omnimind/skills
       },
       "download_url": "https://license.vinhyenit.com/skills/office_meeting_notes.zip",
       "is_owned": true,
-      "requires_purchase": false
+      "requires_purchase": false,
+      "pricing": {
+        "currency": "VND",
+        "base_price": 0,
+        "effective_price": 0,
+        "discount_amount": 0,
+        "discount_percent": null,
+        "override_price": null,
+        "pricing_source": "base_price",
+        "override_id": null,
+        "override_note": ""
+      }
     }
   ]
 }
@@ -228,7 +242,18 @@ GET /api/v1/omnimind/skills/:id/download
   "url": "https://license.vinhyenit.com/skills/office_meeting_notes.zip",
   "checksum": "",
   "file_name": "",
-  "size": null
+  "size": null,
+  "pricing": {
+    "currency": "VND",
+    "base_price": 49000,
+    "effective_price": 39000,
+    "discount_amount": 10000,
+    "discount_percent": null,
+    "override_price": 39000,
+    "pricing_source": "override_price",
+    "override_id": 12,
+    "override_note": "Khuyến mãi đầu tháng"
+  }
 }
 ```
 
@@ -264,6 +289,38 @@ POST /api/v1/omnimind/skills/:id/purchase
 }
 ```
 
+**Response 402 (skill trả phí, cần thanh toán SePay)**
+
+```json
+{
+  "success": false,
+  "code": "PAYMENT_REQUIRED",
+  "message": "Skill trả phí. Vui lòng thanh toán để tiếp tục.",
+  "payment": {
+    "id": "txn_1740900000000_ab12cd34",
+    "type": "SKILL",
+    "item_id": "office-email-assistant",
+    "license_key": "AG-XXXX",
+    "amount": 39000,
+    "currency": "VND",
+    "status": "PENDING",
+    "provider": "SEPAY",
+    "payment_content": "OMOFFICEAB12CD34",
+    "qr_url": "https://img.vietqr.io/image/VCB-0123456789-qr_only.png?...",
+    "expires_at": "2026-03-03T12:00:00.000Z"
+  },
+  "pricing": {
+    "currency": "VND",
+    "base_price": 49000,
+    "effective_price": 39000
+  }
+}
+```
+
+Ghi chú:
+- `amount` luôn được backend snapshot từ `price` + override đang active tại thời điểm tạo order.
+- Client không được gửi giá lên server.
+
 ---
 
 ## 2.8 List Purchased Skills theo License
@@ -292,6 +349,57 @@ GET /api/v1/omnimind/licenses/:license_key/skills
 
 ---
 
+## 2.9 Payment Order Status
+
+**Endpoint**
+
+```http
+GET /api/v1/omnimind/payments/orders/:id
+```
+
+**Query params**
+- `license_key` (bắt buộc)
+
+**Response 200**
+
+```json
+{
+  "success": true,
+  "order": {
+    "id": "txn_1740900000000_ab12cd34",
+    "status": "PENDING",
+    "amount": 39000,
+    "currency": "VND",
+    "payment_content": "OMOFFICEAB12CD34",
+    "qr_url": "https://img.vietqr.io/image/..."
+  }
+}
+```
+
+---
+
+## 2.10 SePay Webhook
+
+**Endpoint**
+
+```http
+POST /api/v1/omnimind/payments/webhooks/sepay
+```
+
+**Header bắt buộc**
+
+```http
+Authorization: Apikey <SEPAY_API_KEY>
+```
+
+**Mô tả**
+- Nhận callback từ SePay.
+- Match transaction theo `payment_content` (`code` ưu tiên, fallback `content`) + `transferAmount`.
+- Idempotent theo `sepay_id`.
+- Match thành công sẽ chuyển `transactions.status = SUCCESS` và cấp quyền skill.
+
+---
+
 ## 3. Admin API - OmniMind Marketplace/CMS
 
 ## 3.1 Versions
@@ -310,6 +418,8 @@ Body mẫu:
   "version_name": "Phoenix Update",
   "is_critical": false,
   "download_url": "https://...",
+  "checksum_sha256": "5e2611e630394f9a31042ad044c4f708f497b36643cdd3be93cfd0f147ae59c6",
+  "package_size_bytes": 396000000,
   "changelogs": [
     { "type": "feat", "content": "..." }
   ]
@@ -379,6 +489,51 @@ Body:
 }
 ```
 
+### GET /api/v1/admin/omnimind/payments/config
+Lấy cấu hình thanh toán SePay (masked API key).
+
+### PUT /api/v1/admin/omnimind/payments/config
+Cập nhật cấu hình thanh toán:
+- `bank_code`
+- `bank_account`
+- `bank_account_name`
+- `qr_base_url`
+- `sepay_api_key`
+
+### GET /api/v1/admin/omnimind/pricing/overrides
+Lấy danh sách giá override/discount cho skill.
+
+### POST /api/v1/admin/omnimind/pricing/overrides
+Tạo rule giá:
+- `skill_id` (bắt buộc)
+- `override_price` hoặc `discount_percent`
+- `starts_at`, `ends_at`, `is_active`, `note`
+
+### DELETE /api/v1/admin/omnimind/pricing/overrides/:id
+Xoá override giá theo ID.
+
+### GET /api/v1/admin/omnimind/payments/transactions
+Xem lịch sử giao dịch SePay đã tạo.
+
+### GET /api/v1/admin/omnimind/payments/users/history
+Xem lịch sử thanh toán theo từng license/user:
+- Tổng số giao dịch
+- Số lượng success/pending/failed
+- Tổng doanh thu success
+- Giao dịch đầu tiên/gần nhất
+
+Query:
+- `limit` (max 500, default 100)
+- `search` (lọc theo `license_key`, `item_id`, `payment_content`)
+
+### GET /api/v1/admin/omnimind/monitoring/summary
+API monitoring tập trung cho vận hành:
+- `transactions_24h`
+- `transactions_7d`
+- `overdue_pending_count`
+- `webhook_24h`
+- `audits_24h`
+
 ---
 
 ## 3.3 Devices
@@ -412,6 +567,8 @@ Ngoài ra có public endpoint cũ:
 - `GET /api/v1/omnimind/skills/:id/download`
 - `POST /api/v1/omnimind/skills/:id/purchase`
 - `GET /api/v1/omnimind/licenses/:license_key/skills`
+- `GET /api/v1/omnimind/payments/orders/:id`
+- `POST /api/v1/omnimind/payments/webhooks/sepay`
 
 ### Admin
 - `GET /api/v1/admin/omnimind/skills`
@@ -419,3 +576,9 @@ Ngoài ra có public endpoint cũ:
 - `PATCH /api/v1/admin/omnimind/skills/:id`
 - `DELETE /api/v1/admin/omnimind/skills/:id`
 - `POST /api/v1/admin/omnimind/skills/:id/grant`
+- `GET /api/v1/admin/omnimind/payments/config`
+- `PUT /api/v1/admin/omnimind/payments/config`
+- `GET /api/v1/admin/omnimind/pricing/overrides`
+- `POST /api/v1/admin/omnimind/pricing/overrides`
+- `DELETE /api/v1/admin/omnimind/pricing/overrides/:id`
+- `GET /api/v1/admin/omnimind/payments/transactions`
