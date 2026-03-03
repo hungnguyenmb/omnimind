@@ -2,12 +2,14 @@
 OmniMind - Tab 5: Skill Marketplace
 Kết nối API thật để xem marketplace, cài đặt và gỡ skills cho OmniMind.
 """
+from datetime import datetime
+
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QFrame, QGraphicsDropShadowEffect, QGridLayout, QTabWidget,
     QScrollArea, QDialog, QMessageBox
 )
-from PyQt5.QtCore import Qt, QThread, pyqtSignal
+from PyQt5.QtCore import Qt, QThread, QTimer, pyqtSignal
 from PyQt5.QtGui import QColor, QPixmap
 
 from ui.icons import Icons
@@ -139,9 +141,13 @@ class PaymentStatusWorker(QThread):
 
 
 class SkillPaymentQrDialog(QDialog):
-    def __init__(self, skill_name: str, amount_text: str, qr_url: str, parent=None):
+    def __init__(self, skill_name: str, amount_text: str, qr_url: str, expires_at: str = "", parent=None):
         super().__init__(parent)
         self._qr_url = str(qr_url or "").strip()
+        self._expiry_dt = self._parse_expiry(expires_at)
+        self._timer = QTimer(self)
+        self._timer.setInterval(1000)
+        self._timer.timeout.connect(self._tick_countdown)
         self.setWindowTitle("Thanh toán skill")
         self.setMinimumWidth(420)
         self.setModal(True)
@@ -167,6 +173,11 @@ class SkillPaymentQrDialog(QDialog):
         note_lbl.setStyleSheet("font-size: 12px; color: #64748B;")
         layout.addWidget(note_lbl)
 
+        self.countdown_label = QLabel("")
+        self.countdown_label.setAlignment(Qt.AlignCenter)
+        self.countdown_label.setStyleSheet("font-size: 12px; color: #0F172A; font-weight: 700;")
+        layout.addWidget(self.countdown_label)
+
         self.qr_label = QLabel("Đang tải mã QR...")
         self.qr_label.setAlignment(Qt.AlignCenter)
         self.qr_label.setFixedSize(300, 300)
@@ -188,6 +199,35 @@ class SkillPaymentQrDialog(QDialog):
         layout.addLayout(btn_row)
 
         self._load_qr()
+        self._tick_countdown()
+        if self._expiry_dt:
+            self._timer.start()
+
+    @staticmethod
+    def _parse_expiry(value: str):
+        text = str(value or "").strip()
+        if not text:
+            return None
+        normalized = text.replace("Z", "+00:00")
+        try:
+            return datetime.fromisoformat(normalized)
+        except Exception:
+            return None
+
+    def _tick_countdown(self):
+        if not self._expiry_dt:
+            self.countdown_label.setText("")
+            return
+        now = datetime.now(self._expiry_dt.tzinfo) if self._expiry_dt.tzinfo else datetime.now()
+        remain = int((self._expiry_dt - now).total_seconds())
+        if remain <= 0:
+            self.countdown_label.setText("Thời gian thanh toán: đã hết hạn")
+            self.countdown_label.setStyleSheet("font-size: 12px; color: #EF4444; font-weight: 700;")
+            self._timer.stop()
+            return
+        minutes, seconds = divmod(remain, 60)
+        self.countdown_label.setText(f"Thời gian thanh toán còn lại: {minutes:02d}:{seconds:02d}")
+        self.countdown_label.setStyleSheet("font-size: 12px; color: #0F172A; font-weight: 700;")
 
     def _load_qr(self):
         if not self._qr_url:
@@ -215,6 +255,11 @@ class SkillPaymentQrDialog(QDialog):
     def mark_paid(self):
         self.status_label.setText("Đã nhận thanh toán. Đang cài đặt skill...")
         self.status_label.setStyleSheet("font-size: 12px; color: #10B981; font-weight: 700;")
+        self._timer.stop()
+
+    def closeEvent(self, event):
+        self._timer.stop()
+        super().closeEvent(event)
 
 
 class SkillDetailDialog(QDialog):
@@ -680,6 +725,7 @@ class SkillStorePage(QWidget):
                 qr_url = str(payment.get("qr_url", "") or "").strip()
                 amount = payment.get("amount")
                 currency = str(payment.get("currency", "VND") or "VND").strip()
+                expires_at = str(payment.get("expires_at", "") or "").strip()
                 skill_id = action_ctx.get("skill_id", "")
                 skill = self._find_skill_by_id(skill_id) or {}
                 skill_name = str(skill.get("name") or skill_id or "Skill")
@@ -713,6 +759,7 @@ class SkillStorePage(QWidget):
                     skill_name=skill_name,
                     amount_text=amount_text,
                     qr_url=qr_url,
+                    expires_at=expires_at,
                     parent=self,
                 )
                 self._start_payment_poll(skill_id=skill_id, order_id=payment_id)
