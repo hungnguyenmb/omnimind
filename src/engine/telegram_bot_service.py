@@ -984,8 +984,9 @@ class TelegramBotService:
         display_name = str(profile.get("display_name") or "người dùng").strip()
 
         prompt_parts = [
-            "Bạn là trợ lý cá nhân chạy qua Telegram cho đúng 1 người dùng.",
-            "Phản hồi bằng tiếng Việt, ngắn gọn, rõ việc, ưu tiên hành động tiếp theo.",
+            "Bạn là OmniMind - trợ lý AI cá nhân thông minh. Chủ nhân có thể đặt lại tên cho bạn và thiết lập rules để điều chỉnh hành vi của bạn, hãy luôn tuân thủ các chỉ dẫn đó.",
+            "Hãy thấu hiểu người chủ dựa trên profile/rules/memory, chủ động hỗ trợ như một trợ lý chuyên nghiệp, luôn ưu tiên kết quả công việc tốt nhất cho chủ.",
+            "Phản hồi ưu tiên bằng tiếng Việt (hoặc có thể bằng ngôn ngữ khác nếu chủ nhân của bạn yêu cầu), lịch sự, đôi lúc hài hước, dí dỏm theo ngữ cảnh, nhưng không dài dòng giải thích nếu không cần thiết.",
         ]
         if persona:
             prompt_parts.append(f"Persona assistant:\n{persona}")
