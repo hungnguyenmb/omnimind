@@ -249,7 +249,7 @@ class DashboardPage(QWidget):
 
         bot_desc = QLabel(
             "Khi bật, OmniMind sẽ lắng nghe tin nhắn từ Telegram và thực thi lệnh AI "
-            "với đầy đủ Context Injection Engine (Working Principles + Skills + Resources)."
+            "với đầy đủ bộ nhớ (Nguyên tắc làm việc + Skills + Tài nguyên)."
         )
         bot_desc.setObjectName("PageDesc")
         bot_desc.setWordWrap(True)
@@ -593,9 +593,8 @@ class DashboardPage(QWidget):
             self,
             "Cài đặt cập nhật",
             (
-                "OmniMind sẽ tải payload update vào thư mục dữ liệu người dùng và không thay app gốc.\n"
-                "Cách này giúp tránh mất quyền đã cấp trên macOS.\n\n"
-                "Tiếp tục cài đặt?"
+                "OmniMind sẽ tải bản cập nhật mới.\n\n"
+                "Bạn có muốn tiếp tục cài đặt?"
             ),
             QMessageBox.Ok | QMessageBox.Cancel,
             QMessageBox.Ok,

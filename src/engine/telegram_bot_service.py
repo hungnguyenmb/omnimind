@@ -1024,7 +1024,7 @@ class TelegramBotService:
         )
         prompt_parts.append(f"Tên hiển thị người dùng: {display_name}")
         prompt_parts.append(f"Yêu cầu hiện tại từ Telegram:\n{user_text}")
-        prompt_parts.append("Trả lời trực tiếp, không giải thích dài dòng.")
+        prompt_parts.append("Trả lời trực tiếp, dễ hiểu, lịch sự.")
         return "\n\n".join(prompt_parts).strip(), context
 
     def _stream_codex_response(
@@ -1046,13 +1046,13 @@ class TelegramBotService:
 
         draft_id = None
         try:
-            draft_id = transport.send_message(chat_id, "🤔 AI đang suy nghĩ câu trả lời...")
+            draft_id = transport.send_message(chat_id, "🤔 AI đang xử lý...")
             self._append_stream_preview_log(
                 {
                     "phase": "preview_init",
                     "chat_id": str(chat_id),
                     "draft_message_id": int(draft_id),
-                    "preview_text": "🤔 AI đang suy nghĩ câu trả lời...",
+                    "preview_text": "🤔 AI đang xử lý...",
                     **trace,
                 }
             )

@@ -596,7 +596,7 @@ class CodexRuntimeBridge:
                 bufsize=1,
             )
         except FileNotFoundError:
-            return {"success": False, "message": "Không tìm thấy OmniMind CLI (`codex`).", "output": ""}
+            return {"success": False, "message": "Không tìm thấy OmniMind (`codex`).", "output": ""}
         except Exception as e:
             return {"success": False, "message": f"Không thể khởi chạy OmniMind: {e}", "output": ""}
 

@@ -7,9 +7,12 @@ venv/
 env/
 .env
 build/
+build-*/
 dist/
+dist-*/
 *.spec
 downloads/
 logs/
 data/*.db
 data/*.sqlite
+venv-x86*/

@@ -44,8 +44,8 @@ class RuleDialog(QDialog):
         self.content_input = QTextEdit()
         self.content_input.setObjectName("FormInput")
         self.content_input.setPlaceholderText("Mô tả chi tiết quy tắc cho AI tuân thủ...\n\n"
-                                              "Nội dung này sẽ được inject trực tiếp vào System Context "
-                                              "mỗi khi AI xử lý lệnh từ Telegram.")
+                                              "Nội dung này sẽ được nạp trực tiếp vào System Context "
+                                              "mỗi khi AI xử lý lệnh.")
         self.content_input.setText(content)
         self.content_input.setMinimumHeight(240)
         layout.addWidget(self.content_input, 1)  # stretch=1 chiếm không gian còn lại
@@ -123,7 +123,7 @@ class MemoryPage(QWidget):
         title = QLabel("Quy Tắc & Trí Nhớ")
         title.setObjectName("PageTitle")
         desc = QLabel("Định nghĩa các quy tắc cốt lõi (Working Principles). "
-                       "Nội dung này sẽ được tự động inject vào mọi lệnh AI gửi qua Telegram.")
+                       "Nội dung này sẽ được tự động nạp vào bộ nhớ của AI.")
         desc.setObjectName("PageDesc")
         desc.setWordWrap(True)
         h_layout.addWidget(title)
@@ -148,7 +148,7 @@ class MemoryPage(QWidget):
         profile_layout.addWidget(profile_title)
 
         profile_desc = QLabel(
-            "Thông tin này sẽ được inject vào prompt để OmniMind hiểu cách xưng hô và phong cách phản hồi mong muốn."
+            "Thông tin này sẽ được nạp vào bộ nhớ để OmniMind hiểu cách xưng hô và phong cách phản hồi mong muốn."
         )
         profile_desc.setStyleSheet("font-size: 12px; color: #64748B;")
         profile_desc.setWordWrap(True)
@@ -158,7 +158,7 @@ class MemoryPage(QWidget):
         row1.setSpacing(10)
         self.assistant_name_input = QLineEdit()
         self.assistant_name_input.setObjectName("FormInput")
-        self.assistant_name_input.setPlaceholderText("Tên hiển thị người dùng (VD: Anh Hùng)")
+        self.assistant_name_input.setPlaceholderText("Tên hiển thị người dùng (VD: Sếp, Boss, Chủ tịch...)")
         self.assistant_name_input.setMinimumHeight(40)
         row1.addWidget(self.assistant_name_input, 1)
 
@@ -252,7 +252,7 @@ class MemoryPage(QWidget):
             self.assistant_persona_input.setPlainText(str(profile.get("persona_prompt") or ""))
         if self.assistant_hint is not None:
             self.assistant_hint.setText(
-                "Đã nạp hồ sơ trợ lý từ SQLite. Nội dung sẽ được inject vào prompt Telegram/OmniMind."
+                "Đã nạp hồ sơ vào bộ não của OmniMind."
             )
 
     def _save_profile(self):

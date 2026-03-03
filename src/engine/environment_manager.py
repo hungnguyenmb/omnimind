@@ -62,7 +62,7 @@ DEFAULT_RELEASE_MANIFEST = {
 class EnvironmentManager:
     """
     Quản lý việc kiểm tra, cài đặt và cấu hình môi trường chạy AI 
-    (Python, Node, npm, OmniMind CLI) tương thích Cross-Platform (macOS / Windows).
+    (Python, Node, npm, OmniMind) tương thích Cross-Platform (macOS / Windows).
     """
     
     def __init__(self):
@@ -244,7 +244,7 @@ class EnvironmentManager:
 
             return {
                 "success": True,
-                "message": "Đã lưu cấu hình OmniMind CLI.",
+                "message": "Đã lưu cấu hình OmniMind.",
                 "config_path": str(config_path),
                 "model": model,
                 "sandbox_mode": sandbox_mode,
@@ -654,15 +654,15 @@ class EnvironmentManager:
         progress_callback: Optional[Callable[[int, str], None]] = None,
     ) -> bool:
         """
-        Tải binary OmniMind CLI từ Server, giải nén vào self.codex_bin_dir
+        Tải binary OmniMind từ Server, giải nén vào self.codex_bin_dir
         """
-        logger.info(f"Downloading OmniMind CLI from {download_url}...")
+        logger.info(f"Downloading OmniMind from {download_url}...")
         archive_path = self.app_data_dir / "codex_temp.pkg"
         
         try:
             # Tải file
             req = urllib.request.Request(download_url, headers={'User-Agent': 'OmniMind-App'})
-            self._emit_progress(progress_callback, 5, "Bắt đầu tải OmniMind CLI...")
+            self._emit_progress(progress_callback, 5, "Bắt đầu tải OmniMind...")
             with urllib.request.urlopen(req) as response, open(archive_path, 'wb') as out_file:
                 total_size = int(response.headers.get("Content-Length", "0") or "0")
                 downloaded = 0
@@ -677,7 +677,7 @@ class EnvironmentManager:
                         pct = 5 + int((downloaded / total_size) * 65)
                     else:
                         pct = min(70, 5 + int(downloaded / (1024 * 1024)))
-                    self._emit_progress(progress_callback, pct, "Đang tải OmniMind CLI...")
+                    self._emit_progress(progress_callback, pct, "Đang tải OmniMind...")
 
             checksum = str(expected_checksum or "").strip().lower()
             if checksum:
@@ -690,8 +690,8 @@ class EnvironmentManager:
                 if actual != checksum:
                     raise RuntimeError("Checksum gói OmniMind không khớp. Vui lòng thử lại.")
             
-            logger.info("Extracting OmniMind CLI...")
-            self._emit_progress(progress_callback, 75, "Đang giải nén OmniMind CLI...")
+            logger.info("Extracting OmniMind...")
+            self._emit_progress(progress_callback, 75, "Đang giải nén OmniMind...")
             # Giải nén
             extracted = False
             if zipfile.is_zipfile(archive_path):
@@ -720,7 +720,7 @@ class EnvironmentManager:
 
             # Dọn dẹp
             os.remove(archive_path)
-            logger.info("OmniMind CLI installed successfully.")
+            logger.info("OmniMind installed successfully.")
             self._emit_progress(progress_callback, 100, "Cài đặt OmniMind hoàn tất.")
             return True
             
@@ -795,10 +795,10 @@ class EnvironmentManager:
             logger.error("Failed to parse auth.json")
             return {"success": False, "message": "Lỗi file cấu hình OmniMind."}
         except FileNotFoundError:
-            logger.error("OmniMind CLI not found.")
-            return {"success": False, "message": "Không tìm thấy OmniMind CLI."}
+            logger.error("OmniMind not found.")
+            return {"success": False, "message": "Không tìm thấy OmniMind."}
         except subprocess.TimeoutExpired:
-            logger.error("OmniMind CLI status check timed out.")
+            logger.error("OmniMind status check timed out.")
             return {"success": False, "message": "Hết thời gian chờ kết nối CLI."}
         except Exception as e:
             logger.exception("Unexpected error during Codex auth verification")
@@ -806,7 +806,7 @@ class EnvironmentManager:
 
     def login_codex(self) -> dict:
         """
-        Thực hiện lệnh đăng nhập OmniMind CLI.
+        Thực hiện lệnh đăng nhập OmniMind.
         """
         try:
             codex_cmd = self._resolve_codex_cmd()
@@ -832,7 +832,7 @@ class EnvironmentManager:
 
             return {
                 "success": False,
-                "message": err or output or "Không thể đăng nhập OmniMind CLI.",
+                "message": err or output or "Không thể đăng nhập OmniMind.",
             }
         except subprocess.TimeoutExpired:
             return {
