@@ -5,7 +5,7 @@ Form Token Telegram, Workspace Path, OmniMind Config, Auto-start.
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QLineEdit, QComboBox, QFrame, QGraphicsDropShadowEffect,
-    QCheckBox, QFileDialog, QScrollArea, QMessageBox, QProgressBar
+    QCheckBox, QFileDialog, QScrollArea, QMessageBox, QProgressBar, QSizePolicy
 )
 from PyQt5.QtCore import Qt, QSize, QThread, pyqtSignal
 from PyQt5.QtGui import QColor
@@ -318,12 +318,12 @@ class AuthPage(QWidget):
 
         self.runtime_missing_box = QFrame()
         self.runtime_missing_box.setStyleSheet(
-            "QFrame { background: #F8FAFC; border: 1px solid #E2E8F0; border-radius: 12px; }"
+            "QFrame { background: #F8FAFC; border: none; border-radius: 12px; }"
         )
         runtime_box_layout = QVBoxLayout(self.runtime_missing_box)
         runtime_box_layout.setContentsMargins(12, 10, 12, 10)
         runtime_box_layout.setSpacing(8)
-        self.runtime_missing_title = QLabel("Thiếu môi trường runtime")
+        self.runtime_missing_title = QLabel("Thiếu môi trường cho AI hoạt động")
         self.runtime_missing_title.setStyleSheet("font-size: 13px; font-weight: 700; color: #0F172A;")
         runtime_box_layout.addWidget(self.runtime_missing_title)
         self.runtime_missing_list_layout = QVBoxLayout()
@@ -557,7 +557,7 @@ class AuthPage(QWidget):
         cfg_path = prefs.get("config_path", "")
         if cfg_path:
             self.codex_cfg_hint.setText(
-                f"Cấu hình hiện tại đọc từ {src}: {cfg_path}. Khi lưu sẽ đồng bộ cả SQLite."
+                f"Cấu hình hiện tại sẽ được lưu vào bộ nhớ AI."
             )
         else:
             self.codex_cfg_hint.setText("Cấu hình hiện tại đọc từ SQLite. Khi lưu sẽ ghi cả config.toml.")
@@ -633,10 +633,10 @@ class AuthPage(QWidget):
         msg = info.get("message", "")
         hint = info.get("manual_hint", "")
         if self._runtime_installer_ready:
-            text = f"✅ Công cụ cài runtime tự động: {display} · {msg}"
+            text = f"✅ Công cụ cài môi trường cho AI hoạt động tự động: {display} · {msg}"
             color = "#10B981"
         else:
-            text = f"❌ Công cụ cài runtime tự động: {display} · {msg}"
+            text = f"❌ Công cụ cài môi trường cho AI hoạt động tự động: {display} · {msg}"
             if hint:
                 text += f" Gợi ý: {hint}"
             color = "#EF4444"
@@ -660,6 +660,7 @@ class AuthPage(QWidget):
 
             left = QLabel(f"- {self._runtime_display_name(runtime)}")
             left.setStyleSheet("font-size: 13px; color: #334155;")
+            left.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
             row.addWidget(left)
             row.addStretch()
 
@@ -667,9 +668,10 @@ class AuthPage(QWidget):
             btn.setObjectName("SecondaryBtn")
             btn.setCursor(Qt.PointingHandCursor)
             btn.setFixedHeight(30)
-            btn.setMinimumWidth(100)
+            btn.setMinimumWidth(120)
+            btn.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
             btn.clicked.connect(lambda _=False, dep=runtime: self._request_runtime_install(dep))
-            if self._runtime_installing or self._codex_installing or not self._runtime_installer_ready:
+            if self._runtime_installing or self._codex_installing:
                 btn.setEnabled(False)
             if not self._runtime_installer_ready:
                 btn.setToolTip("Thiếu công cụ cài tự động theo HĐH. Xem hướng dẫn bên dưới.")
@@ -954,7 +956,7 @@ class AuthPage(QWidget):
             runtime_warn = ""
             if runtime_missing:
                 runtime_warn = (
-                    f" Thiếu runtime: {', '.join(runtime_missing)}."
+                    f" Thiếu môi trường cho AI hoạt động: {', '.join(runtime_missing)}."
                     " Một số tính năng Bot có thể không hoạt động cho tới khi cài bổ sung."
                 )
             
@@ -998,12 +1000,12 @@ class AuthPage(QWidget):
 
             if runtime_missing:
                 hint_txt = (
-                    "Nhấn \"Tải bộ não AI\" để hệ thống tự động cài runtime còn thiếu (Python/Node/npm),"
+                    "Nhấn \"Tải bộ não AI\" để hệ thống tự động cài môi trường còn thiếu (Python/Node/npm),"
                     " sau đó tải OmniMind."
                 )
             else:
                 hint_txt = (
-                    "Runtime đã đủ. Nhấn \"Tải bộ não AI\" để bắt đầu tải và cài OmniMind."
+                    "Môi trường cho AI hoạt động đã đủ. Nhấn \"Tải bộ não AI\" để bắt đầu tải và cài OmniMind."
                 )
             self.codex_hint.setText(hint_txt)
 
@@ -1028,7 +1030,7 @@ class AuthPage(QWidget):
         if runtime_missing:
             missing_text = ", ".join(self._runtime_display_name(k) for k in runtime_missing)
             self.codex_hint.setText(
-                f"Đang thiếu runtime: {missing_text}. OmniMind vẫn sẽ được cài trước; runtime có thể cài bổ sung sau."
+                f"Đang thiếu môi trường cho AI hoạt động: {missing_text}. OmniMind vẫn sẽ được cài trước; bạn có thể cài bổ sung sau."
             )
 
         if codex_ready:
@@ -1038,7 +1040,7 @@ class AuthPage(QWidget):
             if runtime_missing:
                 missing_text = ", ".join(self._runtime_display_name(k) for k in runtime_missing)
                 self.codex_hint.setText(
-                    f"OmniMind đã có sẵn. Runtime bổ sung còn thiếu: {missing_text}. "
+                    f"OmniMind đã có sẵn. Môi trường bổ sung còn thiếu: {missing_text}. "
                     "Bạn có thể cài sau bằng các nút bên dưới."
                 )
             else:
@@ -1095,7 +1097,7 @@ class AuthPage(QWidget):
         if runtime_missing:
             missing_text = ", ".join(self._runtime_display_name(k) for k in runtime_missing)
             self.codex_hint.setText(
-                f"Cài đặt OmniMind thành công. Runtime bổ sung còn thiếu: {missing_text}. "
+                f"Cài đặt OmniMind thành công. Môi trường bổ sung còn thiếu: {missing_text}. "
                 "Bạn có thể cài sau bằng các nút bên dưới."
             )
         else:

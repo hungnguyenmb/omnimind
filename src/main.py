@@ -201,6 +201,35 @@ def _consume_minimized_flag(argv: list[str]) -> tuple[list[str], bool]:
     return cleaned, minimized
 
 
+def _resolve_stylesheet_path() -> Path | None:
+    """
+    Resolve styles.qss for both dev mode and frozen (PyInstaller) mode.
+    """
+    candidates: list[Path] = []
+
+    # Dev mode: src/main.py -> src/ui/styles.qss
+    candidates.append(Path(__file__).resolve().parent / "ui" / "styles.qss")
+
+    # PyInstaller mode: _MEIPASS points to extracted bundle root.
+    meipass = getattr(sys, "_MEIPASS", "")
+    if meipass:
+        candidates.append(Path(meipass) / "ui" / "styles.qss")
+        candidates.append(Path(meipass) / "_internal" / "ui" / "styles.qss")
+
+    # Fallback: next to executable bundle paths.
+    exe_parent = Path(sys.executable).resolve().parent
+    candidates.append(exe_parent / "ui" / "styles.qss")
+    candidates.append(exe_parent / "_internal" / "ui" / "styles.qss")
+
+    for path in candidates:
+        try:
+            if path.is_file():
+                return path
+        except Exception:
+            continue
+    return None
+
+
 def main():
     # Đồng bộ DB path ổn định trước khi import các module có thể khởi tạo DB singleton.
     os.environ["OMNIMIND_DB_PATH"] = str(_get_local_db_path())
@@ -224,11 +253,13 @@ def main():
 
     # Load stylesheet
     try:
-        styles_path = os.path.join(os.path.dirname(__file__), "ui", "styles.qss")
-        with open(styles_path, "r") as f:
+        styles_path = _resolve_stylesheet_path()
+        if not styles_path:
+            raise FileNotFoundError("ui/styles.qss not found in runtime paths")
+        with open(styles_path, "r", encoding="utf-8") as f:
             app.setStyleSheet(f.read())
     except Exception as e:
-        print(f"[OmniMind] Warning: Could not load stylesheet: {e}")
+        logger.warning(f"Could not load stylesheet: {e}")
 
     # ── License Gatekeeper ──
     # Kiểm tra DB xem đã có license_key hợp lệ chưa.
