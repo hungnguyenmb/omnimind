@@ -72,21 +72,17 @@ class CodexRuntimeBridge:
             kwargs["startupinfo"] = startupinfo
         return kwargs
 
-    def _codex_base_cmd(self) -> list[str]:
-        codex_cmd = self.env_manager.resolve_codex_command()
-        # Runtime Telegram trợ lý cá nhân thường chạy ngoài git repo.
-        # Bỏ qua check trusted repo để tránh fail không cần thiết.
-        return [codex_cmd, "--skip-git-repo-check"]
-
     def _build_command(self, prompt: str) -> list[str]:
-        base = self._codex_base_cmd()
+        codex_cmd = self.env_manager.resolve_codex_command()
         # Ưu tiên app-server để stream event chuẩn; giữ fallback exec nếu app-server lỗi.
         if str(ConfigManager.get("codex_runtime_mode", "app-server")).strip().lower() == "exec":
-            return [*base, "exec", str(prompt or "")]
-        return [*base, "app-server", "--listen", "stdio://"]
+            # `--skip-git-repo-check` là flag của `codex exec`, không phải global/app-server.
+            return [codex_cmd, "exec", "--skip-git-repo-check", str(prompt or "")]
+        return [codex_cmd, "app-server", "--listen", "stdio://"]
 
     def _build_exec_command(self, prompt: str) -> list[str]:
-        return [*self._codex_base_cmd(), "exec", str(prompt or "")]
+        codex_cmd = self.env_manager.resolve_codex_command()
+        return [codex_cmd, "exec", "--skip-git-repo-check", str(prompt or "")]
 
     @staticmethod
     def _pump_stream(stream, queue: Queue, tag: str):
