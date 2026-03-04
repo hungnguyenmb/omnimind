@@ -428,7 +428,6 @@ class DashboardPage(QWidget):
         self._pending_bot_enable = enable
 
         self.bot_toggle_btn.setEnabled(False)
-        self.bot_test_capture_btn.setEnabled(False)
         self.bot_toggle_btn.setText("  Đang bật..." if enable else "  Đang tắt...")
 
         self._bot_toggle_worker = BotToggleWorker(self.dashboard_mgr, enable=enable, parent=self)
