@@ -1,6 +1,9 @@
 name: Build OmniMind Windows
 
 on:
+  push:
+    branches:
+      - "temp/build-windows-*"
   workflow_dispatch:
     inputs:
       python_version:
