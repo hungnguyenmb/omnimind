@@ -6,7 +6,7 @@ from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QFrame, QGraphicsDropShadowEffect, QTableWidget, QTableWidgetItem,
     QHeaderView, QAbstractItemView, QDialog, QTextEdit, QLineEdit,
-    QComboBox, QMessageBox
+    QComboBox, QMessageBox, QScrollArea, QSizePolicy
 )
 from PyQt5.QtCore import Qt
 from PyQt5.QtGui import QColor
@@ -111,7 +111,16 @@ class MemoryPage(QWidget):
         self._load_rules()
 
     def _setup_ui(self):
-        layout = QVBoxLayout(self)
+        wrapper = QVBoxLayout(self)
+        wrapper.setContentsMargins(0, 0, 0, 0)
+        wrapper.setSpacing(0)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setObjectName("ScrollArea")
+
+        scroll_content = QWidget()
+        layout = QVBoxLayout(scroll_content)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(24)
 
@@ -177,11 +186,12 @@ class MemoryPage(QWidget):
         self.assistant_persona_input.setPlaceholderText(
             "Persona của trợ lý (VD: Luôn trả lời ngắn gọn, rõ hành động, xưng em gọi người dùng là sếp...)"
         )
-        self.assistant_persona_input.setMinimumHeight(88)
+        self.assistant_persona_input.setMinimumHeight(110)
+        self.assistant_persona_input.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         profile_layout.addWidget(self.assistant_persona_input)
 
         self.assistant_hint = QLabel("")
-        self.assistant_hint.setStyleSheet("font-size: 12px; color: #64748B;")
+        self.assistant_hint.setStyleSheet("font-size: 12px; color: #64748B; padding: 2px 2px 4px 2px;")
         self.assistant_hint.setWordWrap(True)
         profile_layout.addWidget(self.assistant_hint)
 
@@ -238,6 +248,8 @@ class MemoryPage(QWidget):
         card_layout.addWidget(self.table)
         layout.addWidget(table_card)
         layout.addStretch()
+        scroll.setWidget(scroll_content)
+        wrapper.addWidget(scroll)
 
     def _load_rules(self):
         """Tải dữ liệu quy tắc từ DB."""
@@ -251,6 +263,7 @@ class MemoryPage(QWidget):
         if self.assistant_persona_input is not None:
             self.assistant_persona_input.setPlainText(str(profile.get("persona_prompt") or ""))
         if self.assistant_hint is not None:
+            self.assistant_hint.setStyleSheet("font-size: 12px; color: #64748B; padding: 2px 2px 4px 2px;")
             self.assistant_hint.setText(
                 "Đã nạp hồ sơ vào bộ não của OmniMind."
             )

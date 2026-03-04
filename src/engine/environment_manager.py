@@ -9,6 +9,7 @@ import hashlib
 import urllib.request
 import zipfile
 import tarfile
+import time
 from pathlib import Path
 from typing import Callable, Optional
 from engine.config_manager import ConfigManager
@@ -79,6 +80,47 @@ class EnvironmentManager:
         
         # Đưa thư mục bin cục bộ vào PATH tạm thời cho phiên chạy
         os.environ["PATH"] = f"{str(self.codex_bin_dir)}{os.pathsep}{os.environ.get('PATH', '')}"
+        # Finder launch trên macOS thường không nạp shell PATH, cần thêm path tool chuẩn.
+        self._ensure_macos_tool_paths()
+
+    def _prepend_path_once(self, path_value: str) -> None:
+        path_value = str(path_value or "").strip()
+        if not path_value:
+            return
+        current_parts = [p for p in os.environ.get("PATH", "").split(os.pathsep) if p]
+        if path_value in current_parts:
+            return
+        os.environ["PATH"] = os.pathsep.join([path_value] + current_parts)
+
+    def _ensure_macos_tool_paths(self) -> None:
+        if self.os_name != "Darwin":
+            return
+        # Ưu tiên path theo kiến trúc máy, vẫn giữ fallback path còn lại.
+        machine = (platform.machine() or "").lower()
+        if "arm" in machine or "aarch" in machine:
+            preferred = ["/opt/homebrew/bin", "/usr/local/bin"]
+        else:
+            preferred = ["/usr/local/bin", "/opt/homebrew/bin"]
+        for candidate in reversed(preferred):
+            if Path(candidate).exists():
+                self._prepend_path_once(candidate)
+
+    def _resolve_brew_path(self) -> str:
+        if self.os_name != "Darwin":
+            return ""
+        brew_path = shutil.which("brew")
+        if brew_path:
+            return brew_path
+        machine = (platform.machine() or "").lower()
+        candidates = (
+            ["/opt/homebrew/bin/brew", "/usr/local/bin/brew"]
+            if ("arm" in machine or "aarch" in machine)
+            else ["/usr/local/bin/brew", "/opt/homebrew/bin/brew"]
+        )
+        for candidate in candidates:
+            if Path(candidate).is_file() and os.access(candidate, os.X_OK):
+                return candidate
+        return ""
 
     def _codex_env(self) -> dict:
         env = os.environ.copy()
@@ -264,6 +306,72 @@ class EnvironmentManager:
         except Exception:
             pass
 
+    @staticmethod
+    def _summarize_subprocess_error(err: subprocess.CalledProcessError) -> str:
+        stderr = str(getattr(err, "stderr", "") or "").strip()
+        stdout = str(getattr(err, "output", "") or "").strip()
+        raw = stderr or stdout or str(err)
+        first_line = next((ln.strip() for ln in raw.splitlines() if ln.strip()), raw)
+        return first_line[:220]
+
+    def _run_command_with_progress(
+        self,
+        cmd: list[str],
+        *,
+        progress_callback: Optional[Callable[[int, str], None]],
+        start_percent: int,
+        end_percent: int,
+        start_message: str,
+        waiting_message: str,
+        env: Optional[dict] = None,
+        timeout_seconds: int = 1800,
+    ) -> subprocess.CompletedProcess:
+        """
+        Chạy subprocess kiểu non-interactive và đẩy tiến trình heartbeat để UI không đứng yên.
+        """
+        self._emit_progress(progress_callback, start_percent, start_message)
+        process = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            env=env,
+        )
+        start_ts = time.time()
+        next_beat = start_ts + 3
+        current_percent = int(start_percent)
+        bounded_end = max(current_percent, int(end_percent))
+        dot = 0
+
+        while process.poll() is None:
+            now = time.time()
+            if now - start_ts > timeout_seconds:
+                process.kill()
+                process.wait(timeout=5)
+                raise subprocess.TimeoutExpired(cmd=cmd, timeout=timeout_seconds)
+            if now >= next_beat:
+                if current_percent < bounded_end:
+                    current_percent += 1
+                dot = (dot + 1) % 4
+                self._emit_progress(
+                    progress_callback,
+                    current_percent,
+                    f"{waiting_message}{'.' * dot}",
+                )
+                next_beat = now + 3
+            time.sleep(0.2)
+
+        stdout, stderr = process.communicate()
+        completed = subprocess.CompletedProcess(cmd, process.returncode, stdout, stderr)
+        if completed.returncode != 0:
+            raise subprocess.CalledProcessError(
+                completed.returncode,
+                cmd,
+                output=stdout,
+                stderr=stderr,
+            )
+        return completed
+
     def _resolve_codex_cmd(self) -> str:
         """Ưu tiên codex đã cài local trong app, fallback system PATH."""
         return shutil.which("codex", path=str(self.codex_bin_dir)) or shutil.which("codex") or "codex"
@@ -388,13 +496,14 @@ class EnvironmentManager:
         - Windows: winget
         """
         if self.os_name == "Darwin":
-            ready = shutil.which("brew") is not None
+            brew_path = self._resolve_brew_path()
+            ready = bool(brew_path)
             return {
                 "tool": "brew",
                 "display_name": "Homebrew",
                 "ready": ready,
                 "message": (
-                    "Homebrew đã sẵn sàng."
+                    f"Homebrew đã sẵn sàng ({brew_path})."
                     if ready
                     else "Thiếu Homebrew. Cài Homebrew trước khi cài Python/Node tự động."
                 ),
@@ -604,7 +713,8 @@ class EnvironmentManager:
         policy = policy or {}
         try:
             # Kiểm tra Brew trước
-            if not shutil.which("brew"):
+            brew_path = self._resolve_brew_path()
+            if not brew_path:
                 logger.error("Homebrew is missing. Cannot auto-install on macOS.")
                 # TODO: Mở popup hướng dẫn cài Brew
                 self._emit_progress(progress_callback, 100, "Thiếu Homebrew. Vui lòng cài Homebrew trước.")
@@ -628,19 +738,43 @@ class EnvironmentManager:
                 self._emit_progress(progress_callback, 100, "Môi trường đã đầy đủ.")
                 return True
 
+            brew_env = os.environ.copy()
+            brew_env["NONINTERACTIVE"] = "1"
+            brew_env["CI"] = "1"
+            brew_env.setdefault("HOMEBREW_NO_AUTO_UPDATE", "1")
+            brew_env.setdefault("HOMEBREW_NO_INSTALL_CLEANUP", "1")
+
             step = 70 // max(1, len(formulas))
             progress = 20
             for display, formula in formulas:
                 logger.info(f"Running Homebrew installer for {display}: {formula}")
-                self._emit_progress(progress_callback, progress, f"Đang cài {display} bằng Homebrew...")
-                subprocess.run(["brew", "install", formula], check=True)
+                wait_text = f"Đang cài {display} bằng Homebrew (có thể mất vài phút)"
+                self._run_command_with_progress(
+                    [brew_path, "install", formula],
+                    progress_callback=progress_callback,
+                    start_percent=progress,
+                    end_percent=min(88, progress + max(4, step - 1)),
+                    start_message=f"Đang cài {display} bằng Homebrew...",
+                    waiting_message=wait_text,
+                    env=brew_env,
+                    timeout_seconds=1800,
+                )
                 progress = min(90, progress + step)
 
             self._emit_progress(progress_callback, 90, "Đang xác minh môi trường sau cài đặt...")
             return True
+        except subprocess.TimeoutExpired:
+            logger.error("macOS env install timeout")
+            self._emit_progress(
+                progress_callback,
+                100,
+                "Cài đặt quá thời gian chờ. Homebrew có thể đang chờ quyền hoặc mạng chậm.",
+            )
+            return False
         except subprocess.CalledProcessError as e:
-            logger.error(f"macOS env install failed: {e}")
-            self._emit_progress(progress_callback, 100, f"Cài đặt thất bại: {str(e)[:80]}")
+            detail = self._summarize_subprocess_error(e)
+            logger.error(f"macOS env install failed: {detail}")
+            self._emit_progress(progress_callback, 100, f"Cài đặt thất bại: {detail}")
             return False
         except ValueError as e:
             logger.error(f"Invalid installer policy on macOS: {e}")
