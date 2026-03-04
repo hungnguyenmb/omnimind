@@ -71,6 +71,7 @@ class EnvironmentManager:
         self.app_data_dir = self._get_app_data_dir()
         self.codex_home = Path(ConfigManager.get_codex_home())
         self.codex_home.mkdir(parents=True, exist_ok=True)
+        self.last_install_error = ""
         # Chuẩn hóa CODEX_HOME xuyên suốt runtime.
         os.environ["CODEX_HOME"] = str(self.codex_home)
         # Persist để lần chạy sau không lệch path giữa các module.
@@ -82,6 +83,7 @@ class EnvironmentManager:
         os.environ["PATH"] = f"{str(self.codex_bin_dir)}{os.pathsep}{os.environ.get('PATH', '')}"
         # Finder launch trên macOS thường không nạp shell PATH, cần thêm path tool chuẩn.
         self._ensure_macos_tool_paths()
+        self._ensure_windows_tool_paths()
 
     def _prepend_path_once(self, path_value: str) -> None:
         path_value = str(path_value or "").strip()
@@ -104,6 +106,231 @@ class EnvironmentManager:
         for candidate in reversed(preferred):
             if Path(candidate).exists():
                 self._prepend_path_once(candidate)
+
+    def _ensure_windows_tool_paths(self) -> None:
+        if self.os_name != "Windows":
+            return
+        for p in self._windows_runtime_search_paths():
+            if Path(p).exists():
+                self._prepend_path_once(str(p))
+
+    @staticmethod
+    def _is_windowsapps_alias(path_value: str) -> bool:
+        p = str(path_value or "").replace("/", "\\").lower()
+        return "\\microsoft\\windowsapps\\" in p
+
+    @staticmethod
+    def _parse_python_major(version_text: str) -> int:
+        txt = str(version_text or "")
+        m = re.search(r"python\s+(\d+)\.", txt, flags=re.IGNORECASE)
+        if not m:
+            return -1
+        try:
+            return int(m.group(1))
+        except Exception:
+            return -1
+
+    def _run_probe(self, cmd: list[str], timeout: int = 4) -> tuple[bool, str]:
+        try:
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                stdin=subprocess.DEVNULL,
+            )
+            output = f"{result.stdout or ''}\n{result.stderr or ''}".strip()
+            return result.returncode == 0, output
+        except Exception as e:
+            return False, str(e)
+
+    def _windows_runtime_search_paths(self) -> list[Path]:
+        paths: list[Path] = []
+        for env_key in ("ProgramFiles", "ProgramFiles(x86)"):
+            base = Path(os.environ.get(env_key, ""))
+            if base:
+                paths.append(base / "nodejs")
+        local_app = Path(os.environ.get("LOCALAPPDATA", ""))
+        if local_app:
+            paths.append(local_app / "Programs" / "nodejs")
+            py_root = local_app / "Programs" / "Python"
+            paths.extend(sorted(py_root.glob("Python*"), reverse=True))
+        return [p for p in paths if str(p).strip()]
+
+    def _iter_windows_python_candidates(self) -> list[list[str]]:
+        commands: list[list[str]] = []
+        seen: set[str] = set()
+
+        def add(cmd: list[str]):
+            key = " ".join(cmd).lower()
+            if key in seen:
+                return
+            seen.add(key)
+            commands.append(cmd)
+
+        for cmd_name in ("python3", "python"):
+            resolved = shutil.which(cmd_name)
+            if resolved and not self._is_windowsapps_alias(resolved):
+                add([resolved, "--version"])
+
+        local_app = Path(os.environ.get("LOCALAPPDATA", ""))
+        if local_app:
+            py_root = local_app / "Programs" / "Python"
+            for exe in sorted(py_root.glob("Python*/python.exe"), reverse=True):
+                if exe.is_file():
+                    add([str(exe), "--version"])
+
+        for env_key in ("ProgramFiles", "ProgramFiles(x86)"):
+            base = Path(os.environ.get(env_key, ""))
+            if not str(base):
+                continue
+            for exe in sorted(base.glob("Python*/python.exe"), reverse=True):
+                if exe.is_file():
+                    add([str(exe), "--version"])
+
+        py_launcher = shutil.which("py") or str(Path(os.environ.get("WINDIR", "C:\\Windows")) / "py.exe")
+        if py_launcher and Path(py_launcher).exists():
+            add([py_launcher, "-3", "-V"])
+            add([py_launcher, "-V"])
+
+        # Fallback cuối cùng: thử command name chuẩn.
+        add(["python", "--version"])
+        add(["python3", "--version"])
+        return commands
+
+    def _is_python_available(self) -> bool:
+        if self.os_name == "Windows":
+            for cmd in self._iter_windows_python_candidates():
+                ok, output = self._run_probe(cmd, timeout=5)
+                if not ok:
+                    continue
+                major = self._parse_python_major(output)
+                if major >= 3:
+                    return True
+            return False
+
+        for cmd in (["python3", "--version"], ["python", "--version"]):
+            ok, output = self._run_probe(cmd, timeout=4)
+            if not ok:
+                continue
+            major = self._parse_python_major(output)
+            if major >= 3:
+                return True
+        return False
+
+    def _iter_windows_binary_candidates(self, base_name: str, exts: list[str]) -> list[str]:
+        candidates: list[str] = []
+        seen: set[str] = set()
+
+        def add(path_value: str):
+            key = str(path_value or "").strip().lower()
+            if not key or key in seen:
+                return
+            seen.add(key)
+            candidates.append(path_value)
+
+        resolved = shutil.which(base_name)
+        if resolved:
+            add(resolved)
+
+        for base in self._windows_runtime_search_paths():
+            for ext in exts:
+                exe = base / f"{base_name}{ext}"
+                if exe.is_file():
+                    add(str(exe))
+
+        # fallback command name
+        add(base_name)
+        return candidates
+
+    def _is_node_available(self) -> bool:
+        if self.os_name == "Windows":
+            for node_bin in self._iter_windows_binary_candidates("node", [".exe"]):
+                ok, output = self._run_probe([node_bin, "--version"], timeout=4)
+                if ok and re.search(r"v?\d+\.\d+\.\d+", output):
+                    return True
+            return False
+
+        ok, output = self._run_probe(["node", "--version"], timeout=4)
+        return bool(ok and re.search(r"v?\d+\.\d+\.\d+", output))
+
+    def _is_npm_available(self) -> bool:
+        if self.os_name == "Windows":
+            for npm_bin in self._iter_windows_binary_candidates("npm", [".cmd", ".exe", ".bat"]):
+                ok, output = self._run_probe([npm_bin, "--version"], timeout=4)
+                if ok and re.search(r"\d+\.\d+\.\d+", output):
+                    return True
+            return False
+
+        ok, output = self._run_probe(["npm", "--version"], timeout=4)
+        return bool(ok and re.search(r"\d+\.\d+\.\d+", output))
+
+    def _normalize_codex_binary_name(self) -> Path | None:
+        target_name = "codex.exe" if self.os_name == "Windows" else "codex"
+        target_path = self.codex_bin_dir / target_name
+        if target_path.exists():
+            return target_path
+
+        candidates: list[Path] = []
+        for root, _, files in os.walk(self.codex_bin_dir):
+            for file_name in files:
+                lower = file_name.lower()
+                p = Path(root) / file_name
+                if self.os_name == "Windows":
+                    if lower.startswith("codex") and lower.endswith(".exe"):
+                        # Bỏ các helper exe không phải CLI chính
+                        if "command-runner" in lower or "sandbox-setup" in lower:
+                            continue
+                        candidates.append(p)
+                else:
+                    if lower == "codex" or lower.startswith("codex-") or lower.startswith("codex_"):
+                        candidates.append(p)
+
+        if not candidates:
+            return None
+
+        # Ưu tiên file nằm gần root bin dir và tên "gần chuẩn" nhất.
+        def score(path_obj: Path) -> tuple[int, int]:
+            name = path_obj.name.lower()
+            dist = len(path_obj.parts)
+            if name == target_name:
+                return (0, dist)
+            if name.startswith("codex-"):
+                return (1, dist)
+            return (2, dist)
+
+        selected = sorted(candidates, key=score)[0]
+        try:
+            shutil.copy2(selected, target_path)
+            if self.os_name != "Windows":
+                os.chmod(target_path, 0o755)
+            logger.info(f"Normalized OmniMind binary: {selected} -> {target_path}")
+            return target_path
+        except Exception as e:
+            logger.warning(f"Cannot normalize OmniMind binary name from {selected}: {e}")
+            return selected
+
+    def _find_working_codex_command(self) -> str:
+        local_names = ["codex.exe", "codex"] if self.os_name == "Windows" else ["codex"]
+
+        # Ưu tiên binary local trong app data dir.
+        for name in local_names:
+            path = shutil.which(name, path=str(self.codex_bin_dir))
+            if path:
+                ok, _ = self._run_probe([path, "--version"], timeout=5)
+                if ok:
+                    return path
+
+        # Fallback system PATH.
+        for name in local_names:
+            path = shutil.which(name)
+            if path:
+                ok, _ = self._run_probe([path, "--version"], timeout=5)
+                if ok:
+                    return path
+
+        # Last resort: literal command for later error display.
+        return "codex.exe" if self.os_name == "Windows" else "codex"
 
     def _resolve_brew_path(self) -> str:
         if self.os_name != "Darwin":
@@ -374,7 +601,7 @@ class EnvironmentManager:
 
     def _resolve_codex_cmd(self) -> str:
         """Ưu tiên codex đã cài local trong app, fallback system PATH."""
-        return shutil.which("codex", path=str(self.codex_bin_dir)) or shutil.which("codex") or "codex"
+        return self._find_working_codex_command()
 
     def resolve_codex_command(self) -> str:
         """Public wrapper để các runtime services dùng cùng chiến lược resolve codex binary."""
@@ -600,16 +827,21 @@ class EnvironmentManager:
         Kiểm tra xem máy đã có đủ đồ chơi chưa (Python, Node, npm, Codex).
         Trạng thái: OK, MISSING, ERROR
         """
+        # Đồng bộ PATH mỗi lần check để bắt thay đổi sau cài thủ công (đặc biệt trên Windows).
+        self._ensure_macos_tool_paths()
+        self._ensure_windows_tool_paths()
+
+        python_ok = self._is_python_available()
+        node_ok = self._is_node_available()
+        npm_ok = self._is_npm_available()
+
         codex_cmd = self._resolve_codex_cmd()
-        codex_ok = shutil.which(codex_cmd) is not None or codex_cmd == "codex"
-        if codex_ok and codex_cmd == "codex":
-            # Nếu rơi vào fallback literal "codex", kiểm tra lại bằng which để tránh false-positive.
-            codex_ok = shutil.which("codex") is not None
+        codex_ok, _ = self._run_probe([codex_cmd, "--version"], timeout=5)
 
         status = {
-            "python": "OK" if shutil.which("python3") or shutil.which("python") else "MISSING",
-            "node": "OK" if shutil.which("node") else "MISSING",
-            "npm": "OK" if shutil.which("npm") else "MISSING",
+            "python": "OK" if python_ok else "MISSING",
+            "node": "OK" if node_ok else "MISSING",
+            "npm": "OK" if npm_ok else "MISSING",
             "codex": "OK" if codex_ok else "MISSING"
         }
 
@@ -791,6 +1023,7 @@ class EnvironmentManager:
         Tải binary OmniMind từ Server, giải nén vào self.codex_bin_dir
         """
         logger.info(f"Downloading OmniMind from {download_url}...")
+        self.last_install_error = ""
         archive_path = self.app_data_dir / "codex_temp.pkg"
         
         try:
@@ -839,6 +1072,11 @@ class EnvironmentManager:
 
             if not extracted:
                 raise RuntimeError("Định dạng gói OmniMind không hợp lệ (không phải zip/tar).")
+
+            # Chuẩn hóa tên binary để kiểm tra/chạy nhất quán giữa các gói release.
+            normalized_bin = self._normalize_codex_binary_name()
+            if not normalized_bin:
+                raise RuntimeError("Giải nén xong nhưng không tìm thấy binary OmniMind hợp lệ.")
                     
             # Cấp quyền thực thi (chmod +x) trên Mac/Linux
             if self.os_name != "Windows":
@@ -849,17 +1087,24 @@ class EnvironmentManager:
 
             # Verify binary tồn tại sau khi giải nén.
             self._emit_progress(progress_callback, 95, "Đang kiểm tra binary OmniMind...")
-            if not shutil.which("codex", path=str(self.codex_bin_dir)) and not shutil.which("codex"):
-                raise RuntimeError("Không tìm thấy binary codex sau khi cài đặt.")
+            verify_cmd = self._resolve_codex_cmd()
+            ok_verify, verify_output = self._run_probe([verify_cmd, "--version"], timeout=8)
+            if not ok_verify:
+                detail = (verify_output or "").splitlines()
+                hint = detail[0][:140] if detail else "binary không chạy được"
+                raise RuntimeError(f"Không thể chạy OmniMind CLI sau cài đặt: {hint}")
+            logger.info(f"OmniMind binary verified: {verify_cmd} -> {verify_output[:80]}")
 
             # Dọn dẹp
             os.remove(archive_path)
             logger.info("OmniMind installed successfully.")
             self._emit_progress(progress_callback, 100, "Cài đặt OmniMind hoàn tất.")
+            self.last_install_error = ""
             return True
             
         except Exception as e:
             logger.error(f"Download/Install OmniMind failed: {e}")
+            self.last_install_error = f"Lỗi cài đặt OmniMind: {str(e)[:200]}"
             if archive_path.exists():
                 os.remove(archive_path)
             self._emit_progress(progress_callback, 100, f"Lỗi cài đặt OmniMind: {str(e)[:80]}")

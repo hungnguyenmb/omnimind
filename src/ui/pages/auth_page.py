@@ -128,9 +128,13 @@ class CodexInstallWorker(QThread):
                 expected_checksum=(release_data.get("checksum") or ""),
                 progress_callback=lambda pct, msg: self.progress.emit(pct, msg),
             )
+            fail_msg = (
+                getattr(self.env_manager, "last_install_error", "") or
+                "Không tải/cài được OmniMind."
+            )
             self.finished.emit({
                 "success": bool(ok),
-                "message": "Cài đặt OmniMind thành công." if ok else "Không tải/cài được OmniMind.",
+                "message": "Cài đặt OmniMind thành công." if ok else fail_msg,
             })
         except Exception as e:
             logger.exception("Codex install worker failed")
