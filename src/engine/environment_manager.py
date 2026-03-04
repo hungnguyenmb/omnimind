@@ -6,7 +6,6 @@ import logging
 import re
 import json
 import hashlib
-import urllib.request
 import zipfile
 import tarfile
 import time
@@ -143,6 +142,21 @@ class EnvironmentManager:
             return result.returncode == 0, output
         except Exception as e:
             return False, str(e)
+
+    @staticmethod
+    def _resolve_tls_verify_path() -> str | bool:
+        """
+        Ưu tiên CA bundle của certifi (đã được requests phụ thuộc),
+        fallback về verify mặc định nếu không resolve được.
+        """
+        try:
+            import certifi  # type: ignore
+            ca_path = str(certifi.where() or "").strip()
+            if ca_path and Path(ca_path).exists():
+                return ca_path
+        except Exception:
+            pass
+        return True
 
     def _windows_runtime_search_paths(self) -> list[Path]:
         paths: list[Path] = []
@@ -1028,16 +1042,29 @@ class EnvironmentManager:
         
         try:
             # Tải file
-            req = urllib.request.Request(download_url, headers={'User-Agent': 'OmniMind-App'})
             self._emit_progress(progress_callback, 5, "Bắt đầu tải OmniMind...")
-            with urllib.request.urlopen(req) as response, open(archive_path, 'wb') as out_file:
+            verify_target = self._resolve_tls_verify_path()
+            headers = {"User-Agent": "OmniMind-App", "Accept": "application/octet-stream"}
+            response = request_with_retry(
+                "GET",
+                download_url,
+                timeout=30,
+                max_attempts=4,
+                headers=headers,
+                stream=True,
+                verify=verify_target,
+                allow_redirects=True,
+            )
+            if response.status_code >= 400:
+                raise RuntimeError(f"Tải gói OmniMind thất bại (HTTP {response.status_code}).")
+
+            with response, open(archive_path, "wb") as out_file:
                 total_size = int(response.headers.get("Content-Length", "0") or "0")
                 downloaded = 0
                 chunk_size = 1024 * 256
-                while True:
-                    chunk = response.read(chunk_size)
+                for chunk in response.iter_content(chunk_size=chunk_size):
                     if not chunk:
-                        break
+                        continue
                     out_file.write(chunk)
                     downloaded += len(chunk)
                     if total_size > 0:
@@ -1103,11 +1130,23 @@ class EnvironmentManager:
             return True
             
         except Exception as e:
-            logger.error(f"Download/Install OmniMind failed: {e}")
-            self.last_install_error = f"Lỗi cài đặt OmniMind: {str(e)[:200]}"
+            raw_msg = str(e or "").strip()
+            ssl_failed = (
+                "certificate verify failed" in raw_msg.lower()
+                or "CERTIFICATE_VERIFY_FAILED" in raw_msg
+            )
+            if ssl_failed:
+                user_msg = (
+                    "Lỗi SSL khi tải OmniMind: không xác thực được chứng chỉ máy chủ. "
+                    "Hãy kiểm tra ngày giờ hệ thống, proxy/antivirus chặn HTTPS hoặc thử mạng khác."
+                )
+            else:
+                user_msg = f"Lỗi cài đặt OmniMind: {raw_msg[:200]}"
+            logger.error(f"Download/Install OmniMind failed: {raw_msg}")
             if archive_path.exists():
                 os.remove(archive_path)
-            self._emit_progress(progress_callback, 100, f"Lỗi cài đặt OmniMind: {str(e)[:80]}")
+            self.last_install_error = user_msg
+            self._emit_progress(progress_callback, 100, user_msg[:180])
             return False
 
     def verify_codex_auth(self) -> dict:
