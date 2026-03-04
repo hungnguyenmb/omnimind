@@ -39,7 +39,9 @@ jobs:
             --name OmniMind `
             --windowed `
             --paths src `
+            --icon "assets/app-icons/omnimind.ico" `
             --add-data "src/ui/styles.qss;ui" `
+            --add-data "src/ui/assets/omnimind-app.png;ui/assets" `
             src/main.py
 
       - name: Package ZIP

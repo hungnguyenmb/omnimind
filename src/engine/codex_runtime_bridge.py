@@ -40,16 +40,49 @@ class CodexRuntimeBridge:
             return str(Path(configured).expanduser())
         return os.getcwd()
 
+    @staticmethod
+    def _map_known_runtime_error(raw_message: str) -> str:
+        text = str(raw_message or "").strip()
+        low = text.lower()
+        if (
+            "not inside a trusted directory" in low
+            or "skip-git-repo-check was not specified" in low
+        ):
+            return (
+                "Workspace chưa được tin cậy cho OmniMind. "
+                "Vui lòng chọn lại thư mục Workspace và thử lại."
+            )
+        return text
+
+    @staticmethod
+    def _windows_hidden_popen_kwargs() -> dict:
+        if os.name != "nt":
+            return {}
+        kwargs: dict[str, Any] = {}
+        create_no_window = int(getattr(subprocess, "CREATE_NO_WINDOW", 0) or 0)
+        if create_no_window:
+            kwargs["creationflags"] = create_no_window
+        startupinfo_cls = getattr(subprocess, "STARTUPINFO", None)
+        startf_use_showwindow = int(getattr(subprocess, "STARTF_USESHOWWINDOW", 0) or 0)
+        sw_hide = int(getattr(subprocess, "SW_HIDE", 0) or 0)
+        if startupinfo_cls:
+            startupinfo = startupinfo_cls()
+            startupinfo.dwFlags |= startf_use_showwindow
+            startupinfo.wShowWindow = sw_hide
+            kwargs["startupinfo"] = startupinfo
+        return kwargs
+
     def _build_command(self, prompt: str) -> list[str]:
         codex_cmd = self.env_manager.resolve_codex_command()
         # Ưu tiên app-server để stream event chuẩn; giữ fallback exec nếu app-server lỗi.
         if str(ConfigManager.get("codex_runtime_mode", "app-server")).strip().lower() == "exec":
-            return [codex_cmd, "exec", str(prompt or "")]
+            # `--skip-git-repo-check` là flag của `codex exec`, không phải global/app-server.
+            return [codex_cmd, "exec", "--skip-git-repo-check", str(prompt or "")]
         return [codex_cmd, "app-server", "--listen", "stdio://"]
 
     def _build_exec_command(self, prompt: str) -> list[str]:
         codex_cmd = self.env_manager.resolve_codex_command()
-        return [codex_cmd, "exec", str(prompt or "")]
+        return [codex_cmd, "exec", "--skip-git-repo-check", str(prompt or "")]
 
     @staticmethod
     def _pump_stream(stream, queue: Queue, tag: str):
@@ -197,6 +230,7 @@ class CodexRuntimeBridge:
             stderr=subprocess.PIPE,
             text=True,
             bufsize=1,
+            **self._windows_hidden_popen_kwargs(),
         )
 
         msg_queue: Queue = Queue()
@@ -594,6 +628,7 @@ class CodexRuntimeBridge:
                 stderr=subprocess.STDOUT,
                 text=True,
                 bufsize=1,
+                **self._windows_hidden_popen_kwargs(),
             )
         except FileNotFoundError:
             return {"success": False, "message": "Không tìm thấy OmniMind (`codex`).", "output": ""}
@@ -627,6 +662,7 @@ class CodexRuntimeBridge:
             output = "".join(chunks).strip()
             if return_code != 0:
                 message = output or f"OmniMind trả về mã lỗi {return_code}."
+                message = self._map_known_runtime_error(message)
                 return {"success": False, "message": message, "output": output}
             return {"success": True, "message": "OK", "output": output, "mode": "exec"}
         except subprocess.TimeoutExpired:
@@ -673,20 +709,23 @@ class CodexRuntimeBridge:
                     runtime_event_callback,
                     {
                         "kind": "warning",
-                        "text": f"app-server lỗi, chuyển sang exec: {result.get('message', 'unknown error')}",
+                        "text": f"app-server lỗi, chuyển sang exec: {self._map_known_runtime_error(result.get('message', 'unknown error'))}",
                     },
                 )
                 logger.warning(f"app-server failed, fallback exec: {result.get('message', '')}")
             except Exception as e:
                 self._emit_event(
                     runtime_event_callback,
-                    {"kind": "warning", "text": f"app-server exception, fallback exec: {e}"},
+                    {"kind": "warning", "text": f"app-server exception, fallback exec: {self._map_known_runtime_error(str(e))}"},
                 )
                 logger.warning(f"app-server exception, fallback exec: {e}")
 
-        return self._stream_reply_exec(
+        result = self._stream_reply_exec(
             prompt_text=prompt_text,
             on_chunk=on_chunk,
             runtime_event_callback=runtime_event_callback,
             timeout_sec=timeout_sec,
         )
+        if not result.get("success"):
+            result["message"] = self._map_known_runtime_error(str(result.get("message") or ""))
+        return result

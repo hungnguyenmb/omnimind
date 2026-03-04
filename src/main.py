@@ -12,6 +12,7 @@ from pathlib import Path
 from logging.handlers import RotatingFileHandler
 from PyQt5.QtWidgets import QApplication
 from PyQt5.QtCore import Qt
+from PyQt5.QtGui import QIcon
 
 logging.basicConfig(level=logging.INFO, format="[%(name)s] %(message)s")
 logger = logging.getLogger(__name__)
@@ -230,6 +231,35 @@ def _resolve_stylesheet_path() -> Path | None:
     return None
 
 
+def _resolve_app_icon_path() -> Path | None:
+    """
+    Resolve app icon PNG cho runtime (window/tray) ở cả dev và frozen mode.
+    """
+    candidates: list[Path] = []
+
+    # Dev mode.
+    candidates.append(Path(__file__).resolve().parent / "ui" / "assets" / "omnimind-app.png")
+
+    # PyInstaller mode.
+    meipass = getattr(sys, "_MEIPASS", "")
+    if meipass:
+        candidates.append(Path(meipass) / "ui" / "assets" / "omnimind-app.png")
+        candidates.append(Path(meipass) / "_internal" / "ui" / "assets" / "omnimind-app.png")
+
+    # Fallback: near executable.
+    exe_parent = Path(sys.executable).resolve().parent
+    candidates.append(exe_parent / "ui" / "assets" / "omnimind-app.png")
+    candidates.append(exe_parent / "_internal" / "ui" / "assets" / "omnimind-app.png")
+
+    for path in candidates:
+        try:
+            if path.is_file():
+                return path
+        except Exception:
+            continue
+    return None
+
+
 def main():
     # Đồng bộ DB path ổn định trước khi import các module có thể khởi tạo DB singleton.
     os.environ["OMNIMIND_DB_PATH"] = str(_get_local_db_path())
@@ -248,6 +278,14 @@ def main():
     app = QApplication(qt_argv)
     app.setQuitOnLastWindowClosed(False)
     app.setStyle("Fusion")
+
+    try:
+        icon_path = _resolve_app_icon_path()
+        if icon_path:
+            app.setWindowIcon(QIcon(str(icon_path)))
+    except Exception as e:
+        logger.warning(f"Could not set app icon: {e}")
+
     from engine.telegram_bot_service import stop_global_telegram_bot_service
     app.aboutToQuit.connect(stop_global_telegram_bot_service)
 
