@@ -1,0 +1,55 @@
+name: Build OmniMind Windows
+
+on:
+  workflow_dispatch:
+    inputs:
+      python_version:
+        description: "Python version"
+        required: false
+        default: "3.13"
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ github.event.inputs.python_version || '3.13' }}
+
+      - name: Install dependencies
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          if (Test-Path "requirements.txt") {
+            pip install -r requirements.txt
+          }
+          pip install pyinstaller
+
+      - name: Build with PyInstaller
+        shell: pwsh
+        run: |
+          pyinstaller --clean --noconfirm `
+            --name OmniMind `
+            --windowed `
+            --paths src `
+            --add-data "src/ui/styles.qss;ui" `
+            src/main.py
+
+      - name: Package ZIP
+        shell: pwsh
+        run: |
+          $ts = Get-Date -Format "yyyyMMdd-HHmm"
+          $zipName = "OmniMind-windows-x64-$ts.zip"
+          Compress-Archive -Path "dist/OmniMind/*" -DestinationPath $zipName
+          "ZIP_NAME=$zipName" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.ZIP_NAME }}
+          path: ${{ env.ZIP_NAME }}
+          if-no-files-found: error
