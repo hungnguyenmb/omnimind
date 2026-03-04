@@ -30,6 +30,18 @@ class CodexRuntimeBridge:
         self._request_id = 1
 
     @staticmethod
+    def _subprocess_text_kwargs() -> dict:
+        """
+        Decode stdout/stderr ổn định giữa các hệ điều hành.
+        Trên Windows tránh phụ thuộc locale `charmap` (cp1252/cp850...) dễ gây UnicodeDecodeError.
+        """
+        return {
+            "text": True,
+            "encoding": "utf-8",
+            "errors": "replace",
+        }
+
+    @staticmethod
     def _clean_chunk(text: str) -> str:
         body = _ANSI_ESCAPE_RE.sub("", str(text or ""))
         return body.replace("\r\n", "\n").replace("\r", "\n")
@@ -228,7 +240,7 @@ class CodexRuntimeBridge:
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            text=True,
+            **self._subprocess_text_kwargs(),
             bufsize=1,
             **self._windows_hidden_popen_kwargs(),
         )
@@ -626,7 +638,7 @@ class CodexRuntimeBridge:
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
-                text=True,
+                **self._subprocess_text_kwargs(),
                 bufsize=1,
                 **self._windows_hidden_popen_kwargs(),
             )

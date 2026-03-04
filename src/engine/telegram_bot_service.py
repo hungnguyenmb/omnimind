@@ -35,6 +35,8 @@ class TelegramStreamTransport:
     """
 
     MAX_CHUNK_SIZE = 3900
+    MAX_API_RETRIES = 3
+    API_RETRY_BASE_SEC = 0.8
 
     def __init__(self, token: str):
         self.token = str(token or "").strip()
@@ -42,13 +44,43 @@ class TelegramStreamTransport:
 
     def _api(self, method: str, payload: dict, timeout: int = 30) -> dict:
         url = f"https://api.telegram.org/bot{self.token}/{method}"
-        resp = self._session.post(url, json=payload, timeout=timeout)
-        data = resp.json() if resp.content else {}
-        if not isinstance(data, dict):
-            raise RuntimeError(f"Telegram API {method} response không hợp lệ.")
-        if not data.get("ok"):
-            raise RuntimeError(data.get("description") or f"Telegram API {method} lỗi.")
-        return data.get("result", {}) or {}
+        last_err = None
+        for attempt in range(1, self.MAX_API_RETRIES + 1):
+            try:
+                resp = self._session.post(url, json=payload, timeout=timeout)
+            except requests.RequestException as e:
+                last_err = e
+                if attempt >= self.MAX_API_RETRIES:
+                    raise RuntimeError(f"Telegram API {method} lỗi mạng: {str(e)[:220]}")
+                time.sleep(self.API_RETRY_BASE_SEC * attempt)
+                continue
+
+            try:
+                data = resp.json() if resp.content else {}
+            except Exception:
+                data = {}
+            if not isinstance(data, dict):
+                data = {}
+
+            if data.get("ok"):
+                return data.get("result", {}) or {}
+
+            # Retry với lỗi Telegram có thể hồi phục.
+            err_code = int(data.get("error_code") or 0)
+            desc = str(data.get("description") or f"Telegram API {method} lỗi.")
+            if attempt < self.MAX_API_RETRIES and err_code in {429, 500, 502, 503, 504}:
+                retry_after = 0
+                try:
+                    retry_after = int(((data.get("parameters") or {}).get("retry_after")) or 0)
+                except Exception:
+                    retry_after = 0
+                sleep_for = retry_after if retry_after > 0 else self.API_RETRY_BASE_SEC * attempt
+                time.sleep(max(0.2, min(10.0, float(sleep_for))))
+                continue
+
+            raise RuntimeError(desc)
+
+        raise RuntimeError(f"Telegram API {method} lỗi: {str(last_err)[:220] if last_err else 'unknown'}")
 
     @classmethod
     def split_text(cls, text: str) -> list[str]:
@@ -1056,8 +1088,17 @@ class TelegramBotService:
                     **trace,
                 }
             )
-        except Exception:
+        except Exception as e:
             draft_id = None
+            logger.warning(f"Không gửi được draft message Telegram: {e}")
+            self._append_runtime_debug_log(
+                {
+                    "phase": "preview_init_failed",
+                    "chat_id": str(chat_id),
+                    "error": str(e),
+                    **trace,
+                }
+            )
 
         output_chunks: list[str] = []
         thinking_buffer = ""
