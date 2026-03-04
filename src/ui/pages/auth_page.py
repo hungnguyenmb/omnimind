@@ -1179,6 +1179,7 @@ class AuthPage(QWidget):
         ConfigManager.set("codex_auth_status", "verified")
 
     def _set_codex_error(self, msg):
+        msg = self._friendly_codex_auth_error(msg)
         self.codex_status_icon.setText("🔴")
         self.codex_status_label.setText(msg)
         self.codex_status_label.setStyleSheet("font-size: 14px; font-weight: 600; color: #EF4444;")
@@ -1201,6 +1202,32 @@ class AuthPage(QWidget):
         self.codex_download_btn.setEnabled(True)
         self.codex_download_btn.setText("  Tải bộ não AI")
         ConfigManager.set("codex_auth_status", "unverified")
+
+    def _friendly_codex_auth_error(self, msg: str) -> str:
+        """
+        Chuẩn hóa lỗi auth hiển thị trên UI để tránh lộ log kỹ thuật dài.
+        """
+        text = str(msg or "").strip()
+        if not text:
+            return "Xác thực không thành công. Vui lòng thử lại."
+
+        lower = text.lower()
+        noisy_tokens = (
+            "oauth/authorize",
+            "starting local login server",
+            "if your browser did not open",
+            "on a remote or headless machine",
+            "http://localhost",
+        )
+        if any(token in lower for token in noisy_tokens):
+            return (
+                "Xác thực không thành công hoặc đã bị hủy. "
+                "Vui lòng nhấn xác thực lại và hoàn tất đăng nhập trên trình duyệt."
+            )
+
+        if len(text) > 160:
+            return "Xác thực không thành công. Vui lòng thử lại."
+        return text
 
     def _logout_codex(self):
         """Xóa trạng thái xác thực trong CLI và Database."""

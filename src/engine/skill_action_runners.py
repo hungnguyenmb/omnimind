@@ -81,8 +81,31 @@ class SkillActionRunnerRegistry:
         return out_dir / f"{safe_prefix}_{now}.{safe_ext}"
 
     @staticmethod
+    def _windows_hidden_subprocess_kwargs() -> dict:
+        if platform.system() != "Windows":
+            return {}
+        kwargs: dict = {}
+        create_no_window = int(getattr(subprocess, "CREATE_NO_WINDOW", 0) or 0)
+        if create_no_window:
+            kwargs["creationflags"] = create_no_window
+        startupinfo_cls = getattr(subprocess, "STARTUPINFO", None)
+        if startupinfo_cls:
+            startupinfo = startupinfo_cls()
+            startupinfo.dwFlags |= int(getattr(subprocess, "STARTF_USESHOWWINDOW", 0) or 0)
+            startupinfo.wShowWindow = int(getattr(subprocess, "SW_HIDE", 0) or 0)
+            kwargs["startupinfo"] = startupinfo
+        return kwargs
+
+    @staticmethod
     def _run_cmd(args, timeout=20):
-        proc = subprocess.run(args, capture_output=True, text=True, timeout=timeout, check=False)
+        proc = subprocess.run(
+            args,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+            **SkillActionRunnerRegistry._windows_hidden_subprocess_kwargs(),
+        )
         return {
             "ok": proc.returncode == 0,
             "returncode": proc.returncode,

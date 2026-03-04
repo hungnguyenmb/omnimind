@@ -93,6 +93,30 @@ class EnvironmentManager:
             return
         os.environ["PATH"] = os.pathsep.join([path_value] + current_parts)
 
+    def _windows_hidden_subprocess_kwargs(self) -> dict:
+        """
+        Trả về kwargs để subprocess chạy ẩn trên Windows
+        (tránh nháy cửa sổ CMD khi app GUI chạy tác vụ nền).
+        """
+        if self.os_name != "Windows":
+            return {}
+        kwargs: dict = {}
+        create_no_window = int(getattr(subprocess, "CREATE_NO_WINDOW", 0) or 0)
+        if create_no_window:
+            kwargs["creationflags"] = create_no_window
+        startupinfo_cls = getattr(subprocess, "STARTUPINFO", None)
+        if startupinfo_cls:
+            startupinfo = startupinfo_cls()
+            startupinfo.dwFlags |= int(getattr(subprocess, "STARTF_USESHOWWINDOW", 0) or 0)
+            startupinfo.wShowWindow = int(getattr(subprocess, "SW_HIDE", 0) or 0)
+            kwargs["startupinfo"] = startupinfo
+        return kwargs
+
+    def _windows_subprocess_kwargs(self, *, hide_window: bool = True) -> dict:
+        if self.os_name != "Windows":
+            return {}
+        return self._windows_hidden_subprocess_kwargs() if hide_window else {}
+
     def _ensure_macos_tool_paths(self) -> None:
         if self.os_name != "Darwin":
             return
@@ -137,6 +161,7 @@ class EnvironmentManager:
                 text=True,
                 timeout=timeout,
                 stdin=subprocess.DEVNULL,
+                **self._windows_hidden_subprocess_kwargs(),
             )
             output = f"{result.stdout or ''}\n{result.stderr or ''}".strip()
             return result.returncode == 0, output
@@ -566,6 +591,7 @@ class EnvironmentManager:
         waiting_message: str,
         env: Optional[dict] = None,
         timeout_seconds: int = 1800,
+        hide_window: bool = True,
     ) -> subprocess.CompletedProcess:
         """
         Chạy subprocess kiểu non-interactive và đẩy tiến trình heartbeat để UI không đứng yên.
@@ -577,6 +603,7 @@ class EnvironmentManager:
             stderr=subprocess.PIPE,
             text=True,
             env=env,
+            **self._windows_subprocess_kwargs(hide_window=hide_window),
         )
         start_ts = time.time()
         next_beat = start_ts + 3
@@ -939,6 +966,8 @@ class EnvironmentManager:
                         f"Start-Process -FilePath winget -ArgumentList '{arg_list}' -Verb RunAs -Wait",
                     ],
                     check=True,
+                    # Hiển thị cửa sổ PowerShell/UAC để người dùng theo dõi tiến trình cài đặt.
+                    **self._windows_subprocess_kwargs(hide_window=False),
                 )
                 progress = min(90, progress + step)
 
@@ -1004,6 +1033,8 @@ class EnvironmentManager:
                     waiting_message=wait_text,
                     env=brew_env,
                     timeout_seconds=1800,
+                    # macOS vẫn chạy non-interactive trong tiến trình nền.
+                    hide_window=True,
                 )
                 progress = min(90, progress + step)
 
@@ -1190,6 +1221,7 @@ class EnvironmentManager:
                 timeout=3,
                 stdin=subprocess.DEVNULL,
                 env=self._codex_env(),
+                **self._windows_hidden_subprocess_kwargs(),
             )
             
             # Sử dụng timeout ngắn để tránh treo hoàn toàn
@@ -1200,6 +1232,7 @@ class EnvironmentManager:
                 timeout=5, 
                 stdin=subprocess.DEVNULL,
                 env=self._codex_env(),
+                **self._windows_hidden_subprocess_kwargs(),
             )
             
             output = result.stdout.strip()
@@ -1235,12 +1268,14 @@ class EnvironmentManager:
                 timeout=180,
                 stdin=subprocess.DEVNULL,
                 env=self._codex_env(),
+                **self._windows_hidden_subprocess_kwargs(),
             )
 
             output = (result.stdout or "").strip()
             err = (result.stderr or "").strip()
             output_lower = output.lower()
             err_lower = err.lower()
+            combined = "\n".join([p for p in [output, err] if p]).strip()
 
             if result.returncode == 0:
                 return {"success": True, "message": output or "Đăng nhập OmniMind thành công."}
@@ -1250,15 +1285,68 @@ class EnvironmentManager:
 
             return {
                 "success": False,
-                "message": err or output or "Không thể đăng nhập OmniMind.",
+                "message": self._summarize_codex_login_error(combined),
             }
         except subprocess.TimeoutExpired:
             return {
                 "success": False,
-                "message": "Đăng nhập OmniMind quá thời gian chờ. Vui lòng thử lại.",
+                "message": (
+                    "Xác thực không thành công (hết thời gian chờ). "
+                    "Vui lòng nhấn xác thực lại và hoàn tất đăng nhập trên trình duyệt."
+                ),
             }
-        except Exception as e:
-            return {"success": False, "message": f"Lỗi hệ thống: {str(e)[:50]}"}
+        except Exception:
+            logger.exception("login_codex unexpected error")
+            return {
+                "success": False,
+                "message": (
+                    "Xác thực không thành công. "
+                    "Vui lòng kiểm tra mạng và thử lại."
+                ),
+            }
+
+    def _summarize_codex_login_error(self, raw: str) -> str:
+        """
+        Chuẩn hóa lỗi từ `codex login` thành thông báo ngắn gọn cho UI,
+        tránh hiển thị log/oauth URL dài trên giao diện.
+        """
+        message = (raw or "").strip()
+        if not message:
+            return "Xác thực không thành công. Vui lòng thử lại."
+
+        lower = message.lower()
+        if any(token in lower for token in ("timed out", "timeout", "time out", "expired")):
+            return (
+                "Xác thực không thành công (hết thời gian chờ). "
+                "Vui lòng xác thực lại."
+            )
+
+        if any(
+            token in lower
+            for token in (
+                "access_denied",
+                "cancel",
+                "canceled",
+                "cancelled",
+                "authorization_pending",
+                "device code expired",
+                "failed to authenticate",
+                "if your browser did not open",
+                "on a remote or headless machine",
+            )
+        ):
+            return (
+                "Xác thực không thành công hoặc đã bị hủy. "
+                "Vui lòng nhấn xác thực lại và hoàn tất đăng nhập trên trình duyệt."
+            )
+
+        if "ssl" in lower or "certificate" in lower:
+            return (
+                "Xác thực không thành công do lỗi SSL/kết nối bảo mật. "
+                "Vui lòng kiểm tra mạng hoặc proxy rồi thử lại."
+            )
+
+        return "Xác thực không thành công. Vui lòng thử lại."
 
     def logout_codex(self) -> dict:
         """
@@ -1272,6 +1360,7 @@ class EnvironmentManager:
                 text=True,
                 timeout=10,
                 env=self._codex_env(),
+                **self._windows_hidden_subprocess_kwargs(),
             )
             
             if result.returncode == 0:
