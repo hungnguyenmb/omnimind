@@ -370,7 +370,6 @@ class AuthPage(QWidget):
         self.codex_model_combo.addItem("gpt-5.3-codex", "gpt-5.3-codex")
         self.codex_model_combo.addItem("gpt-5-codex", "gpt-5-codex")
         self.codex_model_combo.addItem("gpt-5.2-codex", "gpt-5.2-codex")
-        self.codex_model_combo.addItem("o4-mini", "o4-mini")
         self.codex_model_combo.setFixedHeight(44)
         codex_cfg_layout.addWidget(self.codex_model_combo)
 
@@ -540,6 +539,9 @@ class AuthPage(QWidget):
         model = str(prefs.get("model", "gpt-5.3-codex")).strip() or "gpt-5.3-codex"
         sandbox_mode = str(prefs.get("sandbox_mode", "workspace-write")).strip()
         approval_policy = str(prefs.get("approval_policy", "on-request")).strip()
+        supported_models = {"gpt-5.3-codex", "gpt-5-codex", "gpt-5.2-codex"}
+        if model not in supported_models:
+            model = "gpt-5.3-codex"
 
         if sandbox_mode not in {"read-only", "workspace-write", "danger-full-access"}:
             sandbox_mode = "workspace-write"
