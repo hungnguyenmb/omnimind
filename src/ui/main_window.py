@@ -134,7 +134,11 @@ class MainWindow(QMainWindow):
     # ──────────────────────────────────────────────
     def _setup_system_tray(self):
         self.tray_icon = QSystemTrayIcon(self)
-        self.tray_icon.setIcon(Icons.brain("#2563EB", 64))
+        app_icon = QApplication.instance().windowIcon()
+        if app_icon and not app_icon.isNull():
+            self.tray_icon.setIcon(app_icon)
+        else:
+            self.tray_icon.setIcon(Icons.brain("#2563EB", 64))
         self.tray_icon.setToolTip("OmniMind - Pro AI Assistant")
         
         tray_menu = QMenu()
