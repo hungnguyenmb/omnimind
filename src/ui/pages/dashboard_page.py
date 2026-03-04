@@ -161,7 +161,6 @@ class DashboardPage(QWidget):
         self.bot_badge = None
         self.bot_extra = None
         self.bot_toggle_btn = None
-        self.bot_test_capture_btn = None
 
         self._setup_ui()
         self._load_dashboard_data()
@@ -254,18 +253,6 @@ class DashboardPage(QWidget):
         bot_desc.setObjectName("PageDesc")
         bot_desc.setWordWrap(True)
         bot_layout.addWidget(bot_desc)
-
-        bot_action_row = QHBoxLayout()
-        bot_action_row.addStretch()
-        self.bot_test_capture_btn = QPushButton("  Test Chụp Màn Hình")
-        self.bot_test_capture_btn.setObjectName("SecondaryBtn")
-        self.bot_test_capture_btn.setIcon(Icons.eye("#3B82F6", 16))
-        self.bot_test_capture_btn.setCursor(Qt.PointingHandCursor)
-        self.bot_test_capture_btn.setMinimumWidth(210)
-        self.bot_test_capture_btn.setMinimumHeight(38)
-        self.bot_test_capture_btn.clicked.connect(self._test_runtime_screen_capture)
-        bot_action_row.addWidget(self.bot_test_capture_btn)
-        bot_layout.addLayout(bot_action_row)
 
         layout.addWidget(bot_frame)
 
@@ -421,7 +408,6 @@ class DashboardPage(QWidget):
 
         self._pending_bot_action = op_name
         self.bot_toggle_btn.setEnabled(False)
-        self.bot_test_capture_btn.setEnabled(False)
 
         self._bot_action_worker = BotRuntimeActionWorker(
             self.skill_mgr,
@@ -453,7 +439,6 @@ class DashboardPage(QWidget):
         enable = self._pending_bot_enable
         self._bot_toggle_worker = None
         self.bot_toggle_btn.setEnabled(True)
-        self.bot_test_capture_btn.setEnabled(True)
 
         if not result.get("success"):
             self._load_bot_status()
@@ -465,22 +450,8 @@ class DashboardPage(QWidget):
             return
         self._apply_bot_ui(enable)
 
-    def _test_runtime_screen_capture(self):
-        enabled = bool(self.dashboard_mgr.get_telegram_bot_status().get("running", False))
-        if not enabled:
-            QMessageBox.information(self, "Bot chưa bật", "Hãy bật Bot trước khi test runtime action.")
-            return
-
-        self._run_bot_action(
-            "screen_capture_test",
-            "screen_capture",
-            payload={"subdir": "runtime_tests"},
-            auto_request_permissions=True,
-        )
-
     def _on_bot_action_finished(self, result: dict):
         self.bot_toggle_btn.setEnabled(True)
-        self.bot_test_capture_btn.setEnabled(True)
         self._bot_action_worker = None
 
         op = self._pending_bot_action
@@ -651,7 +622,10 @@ class DashboardPage(QWidget):
 
     def _restart_app(self):
         executable = sys.executable
-        args = sys.argv
+        args = list(sys.argv)
+        if not any(str(a).startswith("--wait-instance-unlock=") for a in args):
+            # Tránh race lock: app mới chờ tối đa 8s để instance cũ release lock.
+            args.append("--wait-instance-unlock=8")
         started = QProcess.startDetached(executable, args)
         if started:
             QApplication.quit()

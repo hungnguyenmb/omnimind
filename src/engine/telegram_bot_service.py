@@ -15,6 +15,7 @@ import requests
 from engine.codex_runtime_bridge import CodexRuntimeBridge
 from engine.config_manager import ConfigManager
 from engine.memory_manager import MemoryManager
+from engine.process_lock import InterProcessFileLock
 from engine.skill_manager import SkillManager
 
 logger = logging.getLogger(__name__)
@@ -198,6 +199,9 @@ class TelegramBotService:
         self._memory_mgr = MemoryManager()
         self._codex_bridge = CodexRuntimeBridge()
         self._session = requests.Session()
+        self._poller_lock = InterProcessFileLock(self._bot_lock_path())
+        self._conflict_count = 0
+        self._last_conflict_log_ts = 0.0
         self._path_token_re = re.compile(r"(/[^\s'\"`]+|[A-Za-z]:\\[^\s'\"`]+)")
         self._send_doc_directive_re = re.compile(
             r"\[\[OMNIMIND_SEND_DOCUMENT:(.*?)\]\]",
@@ -223,15 +227,30 @@ class TelegramBotService:
             if not token or not chat_id:
                 return {"success": False, "message": "Thiếu Telegram Token hoặc Chat ID."}
 
+            if not self._poller_lock.acquire():
+                owner_pid = self._poller_lock.read_owner_pid()
+                owner_hint = f" (PID {owner_pid})" if owner_pid else ""
+                msg = (
+                    "Telegram bot đang chạy ở một phiên OmniMind khác trên máy này"
+                    f"{owner_hint}. Hãy tắt phiên đó trước."
+                )
+                logger.warning(msg)
+                return {"success": False, "message": msg}
+
             self._stop_event.clear()
-            self._thread = threading.Thread(target=self._run_loop, name="omnimind-telegram-bot", daemon=True)
-            self._thread.start()
+            try:
+                self._thread = threading.Thread(target=self._run_loop, name="omnimind-telegram-bot", daemon=True)
+                self._thread.start()
+            except Exception as e:
+                self._poller_lock.release()
+                return {"success": False, "message": f"Không thể khởi chạy Telegram bot: {str(e)[:180]}"}
             ConfigManager.set("bot_enabled", "True")
             return {"success": True, "message": "Đã bật Telegram bot runtime."}
 
     def stop(self) -> dict:
         with self._lock:
             if not self.is_running():
+                self._poller_lock.release()
                 ConfigManager.set("bot_enabled", "False")
                 return {"success": True, "message": "Telegram bot đã dừng."}
 
@@ -244,6 +263,7 @@ class TelegramBotService:
                 return {"success": True, "message": "Telegram bot đang dừng nền, vui lòng đợi vài giây."}
 
             self._thread = None
+            self._poller_lock.release()
             ConfigManager.set("bot_enabled", "False")
             return {"success": True, "message": "Đã tắt Telegram bot runtime."}
 
@@ -257,8 +277,22 @@ class TelegramBotService:
             resp = self._session.get(url, params=params, timeout=self.POLL_TIMEOUT_SEC + 10)
             data = resp.json() if resp.content else {}
             if not isinstance(data, dict) or not data.get("ok"):
-                logger.warning(f"getUpdates lỗi: {data}")
+                code = int((data or {}).get("error_code") or 0)
+                if code == 409:
+                    self._conflict_count += 1
+                    now = time.monotonic()
+                    if now - self._last_conflict_log_ts >= 8:
+                        self._last_conflict_log_ts = now
+                        logger.warning(
+                            "getUpdates 409 conflict: bot token đang bị poll bởi tiến trình khác "
+                            f"(x{self._conflict_count})."
+                        )
+                    time.sleep(min(3.0, 0.5 + (self._conflict_count * 0.15)))
+                else:
+                    self._conflict_count = 0
+                    logger.warning(f"getUpdates lỗi: {data}")
                 return []
+            self._conflict_count = 0
             items = data.get("result", [])
             return items if isinstance(items, list) else []
         except Exception as e:
@@ -376,14 +410,24 @@ class TelegramBotService:
         return str(match.group(1)).strip()
 
     @staticmethod
-    def _runtime_debug_log_path() -> Path:
+    def _runtime_root_dir() -> Path:
         if platform.system() == "Windows":
             base = os.environ.get("LOCALAPPDATA", os.path.expanduser("~\\AppData\\Local"))
-            root = Path(base) / "OmniMind" / "logs"
+            root = Path(base) / "OmniMind"
         elif platform.system() == "Darwin":
-            root = Path(os.path.expanduser("~/Library/Application Support")) / "OmniMind" / "logs"
+            root = Path(os.path.expanduser("~/Library/Application Support")) / "OmniMind"
         else:
-            root = Path(os.path.expanduser("~/.omnimind")) / "logs"
+            root = Path(os.path.expanduser("~/.omnimind"))
+        root.mkdir(parents=True, exist_ok=True)
+        return root
+
+    @classmethod
+    def _bot_lock_path(cls) -> Path:
+        return cls._runtime_root_dir() / "telegram_poller.lock"
+
+    @staticmethod
+    def _runtime_debug_log_path() -> Path:
+        root = TelegramBotService._runtime_root_dir() / "logs"
         root.mkdir(parents=True, exist_ok=True)
         return root / "codex_runtime_stream.jsonl"
 
@@ -410,13 +454,7 @@ class TelegramBotService:
 
     @staticmethod
     def _stream_preview_log_path() -> Path:
-        if platform.system() == "Windows":
-            base = os.environ.get("LOCALAPPDATA", os.path.expanduser("~\\AppData\\Local"))
-            root = Path(base) / "OmniMind" / "logs"
-        elif platform.system() == "Darwin":
-            root = Path(os.path.expanduser("~/Library/Application Support")) / "OmniMind" / "logs"
-        else:
-            root = Path(os.path.expanduser("~/.omnimind")) / "logs"
+        root = TelegramBotService._runtime_root_dir() / "logs"
         root.mkdir(parents=True, exist_ok=True)
         return root / "codex_stream_preview_sent.jsonl"
 
@@ -874,71 +912,74 @@ class TelegramBotService:
 
     def _run_loop(self):
         logger.info("Telegram bot loop started.")
-        while not self._stop_event.is_set():
-            cfg = ConfigManager.get_telegram_config()
-            token = str(cfg.get("token") or "").strip()
-            chat_id = str(cfg.get("chat_id") or "").strip()
-            if not token or not chat_id:
-                time.sleep(2)
-                continue
-
-            try:
-                last_offset = int(ConfigManager.get("telegram_last_update_id", "0") or 0)
-            except Exception:
-                last_offset = 0
-
-            updates = self._get_updates(token, last_offset)
-            if not updates:
-                continue
-
-            transport = TelegramStreamTransport(token)
-            for update in updates:
-                if self._stop_event.is_set():
-                    break
-                update_id = int(update.get("update_id") or 0)
-                if update_id <= 0:
+        try:
+            while not self._stop_event.is_set():
+                cfg = ConfigManager.get_telegram_config()
+                token = str(cfg.get("token") or "").strip()
+                chat_id = str(cfg.get("chat_id") or "").strip()
+                if not token or not chat_id:
+                    time.sleep(2)
                     continue
 
-                if update_id > last_offset:
-                    last_offset = update_id
-                    ConfigManager.set("telegram_last_update_id", str(last_offset))
+                try:
+                    last_offset = int(ConfigManager.get("telegram_last_update_id", "0") or 0)
+                except Exception:
+                    last_offset = 0
 
-                # Chỉ xử lý message mới; bỏ edited_message để tránh trả lời lặp khi user sửa tin nhắn.
-                msg = update.get("message") or {}
-                if not isinstance(msg, dict):
-                    continue
-                if not self._chat_match((msg.get("chat") or {}).get("id"), chat_id):
-                    continue
-                user_text = str(msg.get("text") or "").strip()
-                caption = str(msg.get("caption") or "").strip()
-                photos = msg.get("photo") if isinstance(msg.get("photo"), list) else []
-                document = msg.get("document") if isinstance(msg.get("document"), dict) else None
-
-                # text-only
-                if user_text:
-                    self._handle_text_message(
-                        transport=transport,
-                        chat_id=chat_id,
-                        update_id=update_id,
-                        message_id=int(msg.get("message_id") or 0),
-                        user_text=user_text,
-                    )
+                updates = self._get_updates(token, last_offset)
+                if not updates:
                     continue
 
-                # photo/document
-                if photos or document:
-                    self._handle_file_message(
-                        transport=transport,
-                        token=token,
-                        chat_id=chat_id,
-                        update_id=update_id,
-                        message_id=int(msg.get("message_id") or 0),
-                        caption=caption,
-                        photos=photos,
-                        document=document,
-                    )
-                    continue
-        logger.info("Telegram bot loop stopped.")
+                transport = TelegramStreamTransport(token)
+                for update in updates:
+                    if self._stop_event.is_set():
+                        break
+                    update_id = int(update.get("update_id") or 0)
+                    if update_id <= 0:
+                        continue
+
+                    if update_id > last_offset:
+                        last_offset = update_id
+                        ConfigManager.set("telegram_last_update_id", str(last_offset))
+
+                    # Chỉ xử lý message mới; bỏ edited_message để tránh trả lời lặp khi user sửa tin nhắn.
+                    msg = update.get("message") or {}
+                    if not isinstance(msg, dict):
+                        continue
+                    if not self._chat_match((msg.get("chat") or {}).get("id"), chat_id):
+                        continue
+                    user_text = str(msg.get("text") or "").strip()
+                    caption = str(msg.get("caption") or "").strip()
+                    photos = msg.get("photo") if isinstance(msg.get("photo"), list) else []
+                    document = msg.get("document") if isinstance(msg.get("document"), dict) else None
+
+                    # text-only
+                    if user_text:
+                        self._handle_text_message(
+                            transport=transport,
+                            chat_id=chat_id,
+                            update_id=update_id,
+                            message_id=int(msg.get("message_id") or 0),
+                            user_text=user_text,
+                        )
+                        continue
+
+                    # photo/document
+                    if photos or document:
+                        self._handle_file_message(
+                            transport=transport,
+                            token=token,
+                            chat_id=chat_id,
+                            update_id=update_id,
+                            message_id=int(msg.get("message_id") or 0),
+                            caption=caption,
+                            photos=photos,
+                            document=document,
+                        )
+                        continue
+        finally:
+            self._poller_lock.release()
+            logger.info("Telegram bot loop stopped.")
 
     def _handle_file_message(
         self,

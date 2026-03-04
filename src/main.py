@@ -8,14 +8,17 @@ import os
 import logging
 import sqlite3
 import platform
+import time
 from pathlib import Path
 from logging.handlers import RotatingFileHandler
-from PyQt5.QtWidgets import QApplication
+from PyQt5.QtWidgets import QApplication, QMessageBox
 from PyQt5.QtCore import Qt
 from PyQt5.QtGui import QIcon
+from engine.process_lock import InterProcessFileLock
 
 logging.basicConfig(level=logging.INFO, format="[%(name)s] %(message)s")
 logger = logging.getLogger(__name__)
+_APP_INSTANCE_LOCK: InterProcessFileLock | None = None
 
 
 def _get_local_db_path() -> Path:
@@ -35,6 +38,39 @@ def _get_local_db_path() -> Path:
         data_dir = Path(os.path.expanduser("~/.omnimind")) / "data"
     data_dir.mkdir(parents=True, exist_ok=True)
     return data_dir / "omnimind.db"
+
+
+def _get_runtime_root_dir() -> Path:
+    db_path = _get_local_db_path()
+    data_dir = db_path.parent
+    root = data_dir.parent if data_dir.name == "data" else data_dir
+    root.mkdir(parents=True, exist_ok=True)
+    return root
+
+
+def _acquire_app_instance_lock(wait_timeout_sec: float = 0.0) -> tuple[bool, int | None]:
+    global _APP_INSTANCE_LOCK
+    if _APP_INSTANCE_LOCK and _APP_INSTANCE_LOCK.is_acquired():
+        return True, None
+
+    lock = InterProcessFileLock(_get_runtime_root_dir() / "omnimind_app.instance.lock")
+    wait_sec = max(0.0, float(wait_timeout_sec or 0.0))
+    deadline = time.monotonic() + wait_sec
+    while True:
+        if lock.acquire():
+            _APP_INSTANCE_LOCK = lock
+            return True, None
+        if time.monotonic() >= deadline:
+            break
+        time.sleep(0.2)
+    return False, lock.read_owner_pid()
+
+
+def _release_app_instance_lock():
+    global _APP_INSTANCE_LOCK
+    if _APP_INSTANCE_LOCK:
+        _APP_INSTANCE_LOCK.release()
+    _APP_INSTANCE_LOCK = None
 
 
 def _read_config_value_raw(key: str, default: str = "") -> str:
@@ -202,6 +238,22 @@ def _consume_minimized_flag(argv: list[str]) -> tuple[list[str], bool]:
     return cleaned, minimized
 
 
+def _consume_instance_wait_flag(argv: list[str]) -> tuple[list[str], float]:
+    cleaned = []
+    wait_sec = 0.0
+    prefix = "--wait-instance-unlock="
+    for arg in argv:
+        if isinstance(arg, str) and arg.startswith(prefix):
+            raw = arg[len(prefix) :].strip()
+            try:
+                wait_sec = max(0.0, min(30.0, float(raw)))
+            except Exception:
+                wait_sec = 0.0
+            continue
+        cleaned.append(arg)
+    return cleaned, wait_sec
+
+
 def _resolve_stylesheet_path() -> Path | None:
     """
     Resolve styles.qss for both dev mode and frozen (PyInstaller) mode.
@@ -274,10 +326,26 @@ def main():
     QApplication.setAttribute(Qt.AA_EnableHighDpiScaling, True)
     QApplication.setAttribute(Qt.AA_UseHighDpiPixmaps, True)
 
-    qt_argv, start_minimized = _consume_minimized_flag(sys.argv)
+    argv_with_wait, wait_instance_unlock_sec = _consume_instance_wait_flag(sys.argv)
+    qt_argv, start_minimized = _consume_minimized_flag(argv_with_wait)
     app = QApplication(qt_argv)
     app.setQuitOnLastWindowClosed(False)
     app.setStyle("Fusion")
+
+    locked, owner_pid = _acquire_app_instance_lock(wait_timeout_sec=wait_instance_unlock_sec)
+    if not locked:
+        owner_suffix = f" (PID {owner_pid})" if owner_pid else ""
+        logger.warning(f"OmniMind đã chạy ở process khác{owner_suffix}; bỏ qua lần mở mới.")
+        QMessageBox.information(
+            None,
+            "OmniMind đang chạy",
+            (
+                "OmniMind đang chạy ở một phiên khác trên máy này.\n"
+                "Hãy mở lại từ icon tray hoặc đóng phiên cũ trước khi mở phiên mới."
+            ),
+        )
+        sys.exit(0)
+    app.aboutToQuit.connect(_release_app_instance_lock)
 
     try:
         icon_path = _resolve_app_icon_path()
