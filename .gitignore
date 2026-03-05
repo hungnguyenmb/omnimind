@@ -10,6 +10,7 @@ build/
 build-*/
 dist/
 dist-*/
+release-artifacts/
 *.spec
 downloads/
 logs/

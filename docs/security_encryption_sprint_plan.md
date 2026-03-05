@@ -81,3 +81,11 @@ Triển khai bảo vệ dữ liệu theo từng lớp: dữ liệu local, config
   - Báo cáo residual risk.
 - Done khi:
   - Pass checklist phát hành bảo mật.
+
+### Trạng thái triển khai (2026-03-05)
+- Hoàn thành Item 1 (decompile/reverse surface):
+  - `scripts/security/test_decompile_surface.py`
+- Hoàn thành Item 5 (chaos runtime Telegram/Codex):
+  - `scripts/security/run_runtime_chaos_checks.py`
+- Hoàn thành Item 6 (release checklist + rollback playbook):
+  - `docs/sprint6_release_checklist_and_rollback_playbook.md`
