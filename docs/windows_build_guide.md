@@ -105,3 +105,23 @@ pyinstaller --clean --noconfirm ... (chạy lại lệnh build)
 ## 8. Khuyến nghị release chính thức
 - Build local chỉ dùng test nhanh nội bộ.
 - Bản phát hành chính thức nên dùng GitHub Actions workflow `build-windows.yml` để môi trường đồng nhất.
+
+## 9. Luồng hardened release (Sprint 4)
+
+Khi cần bản phát hành chính thức (giảm lộ cấu trúc runtime), dùng script hardened:
+
+```powershell
+python scripts/release/build_hardened.py `
+  --target windows `
+  --version v1.1.0 `
+  --obfuscate pyarmor `
+  --package both
+```
+
+Hoặc dùng wrapper:
+
+```powershell
+.\scripts\release\build_windows_hardened.ps1 -Version v1.1.0 -Obfuscate pyarmor -Package both
+```
+
+Nếu chưa muốn obfuscate trong đợt đầu rollout, đặt `--obfuscate none` để giảm rủi ro build/runtime.

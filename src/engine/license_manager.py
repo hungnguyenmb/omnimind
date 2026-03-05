@@ -107,10 +107,8 @@ class LicenseManager:
 
     def get_saved_token(self) -> str | None:
         """Đọc JWT token xác thực đã cache."""
-        row = self.db.fetch_one(
-            "SELECT value FROM app_configs WHERE key = ?", ("license_jwt",)
-        )
-        return row["value"] if row else None
+        value = str(ConfigManager.get("license_jwt", "") or "").strip()
+        return value or None
 
     def get_saved_hwid(self) -> str | None:
         """Đọc HWID đã cache khi kích hoạt."""
@@ -410,11 +408,7 @@ class LicenseManager:
             "license_activated": "True",
         }
         for key, value in configs.items():
-            self.db.execute_query(
-                "INSERT OR REPLACE INTO app_configs (key, value) VALUES (?, ?)",
-                (key, str(value)),
-                commit=True,
-            )
+            ConfigManager.set(key, str(value))
         logger.info("License activation saved to local DB.")
 
     def _get_cached_plan(self) -> str:

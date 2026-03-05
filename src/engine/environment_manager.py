@@ -19,32 +19,14 @@ _RUNTIME_TOKEN_PATTERN = re.compile(r"^[A-Za-z0-9._@+-]+$")
 
 DEFAULT_API_BASE_URL = "https://license.vinhyenit.com"
 DEFAULT_RELEASE_MANIFEST = {
-    "version": "1.5.0",
+    "version": "",
     "prerequisites": {"python": ">=3.9", "node": ">=18.0"},
     "matrix": {
-        "darwin": {
-            "arm64": {
-                "url": "https://github.com/Antigravity-AI/codex-cli/releases/download/v1.5.0/codex-macos-arm64.zip",
-                "method": "zip_extract",
-            }
-        },
-        "win32": {
-            "x64": {
-                "url": "https://github.com/Antigravity-AI/codex-cli/releases/download/v1.5.0/codex-windows-x64.zip",
-                "method": "zip_extract",
-            }
-        },
+        "darwin": {},
+        "win32": {},
+        "linux": {},
     },
-    "platforms": {
-        "darwin": {
-            "url": "https://github.com/Antigravity-AI/codex-cli/releases/download/v1.5.0/codex-macos-arm64.zip",
-            "method": "zip_extract",
-        },
-        "win32": {
-            "url": "https://github.com/Antigravity-AI/codex-cli/releases/download/v1.5.0/codex-windows-x64.zip",
-            "method": "zip_extract",
-        },
-    },
+    "platforms": {},
     # Remote config có thể override các key này từ server.
     "install_policy": {
         "auto_install_runtime": True,
@@ -82,6 +64,7 @@ class EnvironmentManager:
         os.environ["PATH"] = f"{str(self.codex_bin_dir)}{os.pathsep}{os.environ.get('PATH', '')}"
         # Finder launch trên macOS thường không nạp shell PATH, cần thêm path tool chuẩn.
         self._ensure_macos_tool_paths()
+        self._ensure_user_runtime_paths()
         self._ensure_windows_tool_paths()
 
     def _prepend_path_once(self, path_value: str) -> None:
@@ -129,6 +112,38 @@ class EnvironmentManager:
         for candidate in reversed(preferred):
             if Path(candidate).exists():
                 self._prepend_path_once(candidate)
+
+    def _ensure_user_runtime_paths(self) -> None:
+        """
+        Bổ sung các PATH cài runtime kiểu user-level (nvm/npm-local/volta/asdf).
+        Mục tiêu: app mở từ Finder vẫn detect được node/npm/codex nếu user cài theo profile shell.
+        """
+        if self.os_name not in ("Darwin", "Linux"):
+            return
+
+        home = Path.home()
+        candidates: list[Path] = [
+            home / ".local" / "bin",
+            home / ".npm-packages" / "bin",
+            home / ".npm-global" / "bin",
+            home / ".volta" / "bin",
+            home / ".asdf" / "shims",
+        ]
+
+        # nvm: ưu tiên bản Node mới nhất theo mtime.
+        nvm_versions_dir = home / ".nvm" / "versions" / "node"
+        if nvm_versions_dir.is_dir():
+            nvm_bins = sorted(
+                [p for p in nvm_versions_dir.glob("*/bin") if p.is_dir()],
+                key=lambda p: p.stat().st_mtime,
+                reverse=True,
+            )
+            candidates.extend(nvm_bins[:3])  # giữ ngắn gọn, tránh PATH quá dài
+
+        # Thêm vào PATH theo thứ tự ưu tiên trước (prepend).
+        for candidate in reversed(candidates):
+            if candidate.exists():
+                self._prepend_path_once(str(candidate))
 
     def _ensure_windows_tool_paths(self) -> None:
         if self.os_name != "Windows":
@@ -806,8 +821,8 @@ class EnvironmentManager:
 
     def fetch_codex_release_manifest(self) -> dict:
         """
-        Lấy release manifest từ server; nếu lỗi sẽ fallback local defaults.
-        Cơ chế hybrid này giúp hotfix link tải mà không bắt user update app.
+        Lấy release manifest từ server; nếu lỗi chỉ fallback manifest rỗng cục bộ.
+        URL gói cài chỉ được lấy từ backend/CMS để tránh hardcode trong app.
         """
         api_url = f"{self.get_api_base_url()}/api/v1/omnimind/codex/releases"
         try:
@@ -874,6 +889,7 @@ class EnvironmentManager:
         """
         # Đồng bộ PATH mỗi lần check để bắt thay đổi sau cài thủ công (đặc biệt trên Windows).
         self._ensure_macos_tool_paths()
+        self._ensure_user_runtime_paths()
         self._ensure_windows_tool_paths()
 
         python_ok = self._is_python_available()

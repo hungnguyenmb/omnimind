@@ -1,0 +1,117 @@
+name: Release OmniMind Hardened
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version tag (e.g. v1.2.0)"
+        required: true
+        default: "v1.0.0"
+      obfuscate:
+        description: "Obfuscation mode"
+        required: true
+        type: choice
+        default: "none"
+        options:
+          - none
+          - pyarmor
+      windows_package:
+        description: "Windows package format"
+        required: true
+        type: choice
+        default: "both"
+        options:
+          - zip
+          - installer
+          - both
+      build_macos:
+        description: "Build macOS artifact"
+        required: true
+        type: boolean
+        default: true
+
+jobs:
+  build-windows-hardened:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install dependencies
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          if (Test-Path "requirements.txt") {
+            pip install -r requirements.txt
+          }
+          pip install pyinstaller
+          if ("${{ github.event.inputs.obfuscate }}" -eq "pyarmor") {
+            pip install pyarmor
+          }
+
+      - name: Install Inno Setup
+        if: ${{ github.event.inputs.windows_package == 'installer' || github.event.inputs.windows_package == 'both' }}
+        shell: pwsh
+        run: |
+          choco install innosetup -y --no-progress
+
+      - name: Build hardened release
+        shell: pwsh
+        run: |
+          python scripts/release/build_hardened.py `
+            --target windows `
+            --version "${{ github.event.inputs.version }}" `
+            --obfuscate "${{ github.event.inputs.obfuscate }}" `
+            --package "${{ github.event.inputs.windows_package }}"
+
+      - name: Upload Windows artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: omnimind-windows-hardened-${{ github.event.inputs.version }}
+          path: release-artifacts/*
+          if-no-files-found: error
+
+  build-macos-hardened:
+    if: ${{ github.event.inputs.build_macos == 'true' }}
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install dependencies
+        run: |
+          python3 -m pip install --upgrade pip
+          if [ -f requirements.txt ]; then
+            pip3 install -r requirements.txt
+          fi
+          pip3 install pyinstaller
+          if [ "${{ github.event.inputs.obfuscate }}" = "pyarmor" ]; then
+            pip3 install pyarmor
+          fi
+
+      - name: Build hardened macOS release
+        run: |
+          python3 scripts/release/build_hardened.py \
+            --target macos \
+            --version "${{ github.event.inputs.version }}" \
+            --obfuscate "${{ github.event.inputs.obfuscate }}" \
+            --package zip
+
+      - name: Upload macOS artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: omnimind-macos-hardened-${{ github.event.inputs.version }}
+          path: release-artifacts/*
+          if-no-files-found: error

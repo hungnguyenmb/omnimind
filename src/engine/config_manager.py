@@ -5,19 +5,105 @@ from database.db_manager import db
 
 logger = logging.getLogger(__name__)
 DEFAULT_API_BASE_URL = "https://license.vinhyenit.com"
+ENC_PREFIX_V1 = "enc:v1:"
 
 class ConfigManager:
     """
     Quản lý cấu hình ứng dụng lưu trong bảng app_configs (SQLite).
     Hỗ trợ Save/Load cho Telegram Token, Chat ID, Workspace Path, v.v.
     """
+    SENSITIVE_KEYS = {
+        "telegram_token",
+        "license_jwt",
+    }
+
+    @classmethod
+    def _is_sensitive_key(cls, key: str) -> bool:
+        return str(key or "").strip().lower() in cls.SENSITIVE_KEYS
+
+    @staticmethod
+    def _get_raw_value(key: str, default: str = "") -> str:
+        try:
+            row = db.fetch_one("SELECT value FROM app_configs WHERE key = ?", (key,))
+            return str(row["value"]) if row and row.get("value") is not None else default
+        except Exception as e:
+            logger.error(f"Error reading raw config {key}: {e}")
+            return default
+
+    @staticmethod
+    def _set_raw_value(key: str, value: str):
+        db.execute_query(
+            "INSERT INTO app_configs (key, value) VALUES (?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET value = ?",
+            (key, str(value), str(value)),
+            commit=True
+        )
+
+    @classmethod
+    def _decode_sensitive_if_needed(cls, key: str, raw_value: str, default: str = "") -> str:
+        if not cls._is_sensitive_key(key):
+            return raw_value
+        text = str(raw_value or "")
+        if not text:
+            return default
+        if not text.startswith(ENC_PREFIX_V1):
+            # Legacy plaintext data trước migration.
+            return text
+        token = text[len(ENC_PREFIX_V1):].strip()
+        if not token:
+            return default
+        try:
+            from engine.security_utils import SecurityUtils
+            plain = SecurityUtils.decrypt(token)
+            return plain if plain else default
+        except Exception as e:
+            logger.warning(f"Cannot decrypt config {key}: {e}")
+            return default
+
+    @classmethod
+    def _encode_sensitive_if_needed(cls, key: str, value: str) -> str:
+        text = str(value or "")
+        if not cls._is_sensitive_key(key):
+            return text
+        if not text:
+            return ""
+        try:
+            from engine.security_utils import SecurityUtils
+            token = SecurityUtils.encrypt(text)
+            if not token:
+                raise RuntimeError(f"Encrypt sensitive config failed for key={key}")
+            return f"{ENC_PREFIX_V1}{token}"
+        except Exception as e:
+            raise RuntimeError(f"Encrypt sensitive config exception key={key}: {e}") from e
+
+    @classmethod
+    def migrate_sensitive_configs(cls):
+        """
+        Migration one-way:
+        - Key nhạy cảm đang ở plaintext -> mã hoá enc:v1:<token>.
+        - Idempotent, an toàn khi chạy nhiều lần.
+        """
+        migrated = 0
+        for key in cls.SENSITIVE_KEYS:
+            raw = cls._get_raw_value(key, "")
+            if not raw or str(raw).startswith(ENC_PREFIX_V1):
+                continue
+            encoded = cls._encode_sensitive_if_needed(key, raw)
+            if encoded and encoded != raw:
+                try:
+                    cls._set_raw_value(key, encoded)
+                    migrated += 1
+                except Exception as e:
+                    logger.warning(f"Migrate sensitive key failed ({key}): {e}")
+        if migrated:
+            logger.info(f"Migrated sensitive app_configs: {migrated} key(s).")
 
     @staticmethod
     def get(key: str, default: str = "") -> str:
         """Lấy giá trị cấu hình theo key."""
         try:
-            row = db.fetch_one("SELECT value FROM app_configs WHERE key = ?", (key,))
-            return row["value"] if row else default
+            raw = ConfigManager._get_raw_value(key, default)
+            return ConfigManager._decode_sensitive_if_needed(key, raw, default)
         except Exception as e:
             logger.error(f"Error getting config {key}: {e}")
             return default
@@ -26,13 +112,10 @@ class ConfigManager:
     def set(key: str, value: str):
         """Lưu hoặc cập nhật giá value cho key."""
         try:
-            db.execute_query(
-                "INSERT INTO app_configs (key, value) VALUES (?, ?) "
-                "ON CONFLICT(key) DO UPDATE SET value = ?",
-                (key, str(value), str(value)),
-                commit=True
-            )
-            logger.info(f"Config updated: {key} = {value}")
+            stored = ConfigManager._encode_sensitive_if_needed(key, str(value or ""))
+            ConfigManager._set_raw_value(key, stored)
+            masked = "***" if ConfigManager._is_sensitive_key(key) and str(value or "") else str(value)
+            logger.info(f"Config updated: {key} = {masked}")
             return True
         except Exception as e:
             logger.error(f"Error setting config {key}: {e}")

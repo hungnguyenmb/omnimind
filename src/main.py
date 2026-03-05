@@ -320,7 +320,15 @@ def main():
 
     # Chuẩn hóa CODEX_HOME ngay khi app khởi động để các module dùng cùng 1 path skills/auth.
     from engine.config_manager import ConfigManager
+    from engine.vault_manager import VaultManager
     os.environ["CODEX_HOME"] = ConfigManager.get_codex_home()
+
+    # Sprint 2 migration: mã hoá key nhạy cảm local + chuyển dữ liệu vault cũ.
+    try:
+        ConfigManager.migrate_sensitive_configs()
+        VaultManager.migrate_credentials_encryption()
+    except Exception as e:
+        logger.warning(f"Sensitive data migration warning: {e}")
 
     # Enable High DPI trước khi tạo QApplication
     QApplication.setAttribute(Qt.AA_EnableHighDpiScaling, True)

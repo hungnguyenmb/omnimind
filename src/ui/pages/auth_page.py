@@ -117,8 +117,9 @@ class CodexInstallWorker(QThread):
                 self.finished.emit({
                     "success": False,
                     "message": (
-                        "HĐH/kiến trúc máy chưa có gói OmniMind phù hợp "
-                        f"({release_data.get('platform', 'unknown')}/{release_data.get('arch', 'unknown')})."
+                        "Server chưa cấu hình gói OmniMind cho thiết bị này "
+                        f"({release_data.get('platform', 'unknown')}/{release_data.get('arch', 'unknown')}). "
+                        "Vui lòng cập nhật OmniMind CLI Releases trên CMS."
                     ),
                 })
                 return

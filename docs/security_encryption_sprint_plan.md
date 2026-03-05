@@ -50,6 +50,12 @@ Triển khai bảo vệ dữ liệu theo từng lớp: dữ liệu local, config
   - Artefact installer dùng cho phát hành.
 - Done khi:
   - Không còn phát hành zip lộ trực tiếp cấu trúc runtime.
+  - Có pipeline release hardened riêng (workflow + script local).
+
+### Ghi chú triển khai
+- Script build hardened: `scripts/release/build_hardened.py`
+- Workflow release hardened: `.github/workflows/release-hardened.yml`
+- Installer template Windows: `installer/windows/OmniMind.iss`
 
 ## Sprint 5: Quản lý khóa + vòng đời token (2-3 ngày)
 - Mục tiêu: Có cơ chế rotate/revoke an toàn.
