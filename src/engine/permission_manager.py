@@ -233,4 +233,15 @@ class PermissionManager:
                 return True
         except Exception as e:
             logger.info(f"Native permission prompt unavailable ({permission}): {e}")
+            # Fallback cho build không có pyobjc (đặc biệt các bản PyInstaller).
+            if permission == "screenshot":
+                try:
+                    lib = ctypes.cdll.LoadLibrary("/System/Library/Frameworks/CoreGraphics.framework/CoreGraphics")
+                    req = getattr(lib, "CGRequestScreenCaptureAccess", None)
+                    if req:
+                        req.restype = ctypes.c_bool
+                        req.argtypes = []
+                        return bool(req())
+                except Exception as ee:
+                    logger.info(f"Native screenshot prompt unavailable via ctypes: {ee}")
         return False

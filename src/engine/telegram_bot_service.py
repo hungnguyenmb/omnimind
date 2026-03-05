@@ -5,6 +5,7 @@ import platform
 import re
 import threading
 import time
+import unicodedata
 from datetime import datetime
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -190,6 +191,7 @@ class TelegramBotService:
     MAX_ARTIFACT_SEND_BYTES = 49 * 1024 * 1024
     RUNTIME_DEBUG_LOG_MAX_BYTES = 8 * 1024 * 1024
     MAX_RUNTIME_ACTION_DIRECTIVES = 3
+    PERMISSION_CONFIRM_TTL_SEC = 10 * 60
 
     def __init__(self):
         self._stop_event = threading.Event()
@@ -211,6 +213,7 @@ class TelegramBotService:
             r"\[\[OMNIMIND_RUN_ACTION:(.*?)\]\]",
             re.IGNORECASE | re.DOTALL,
         )
+        self._pending_permission_confirmations: dict[str, dict] = {}
 
     def is_running(self) -> bool:
         th = self._thread
@@ -521,6 +524,45 @@ class TelegramBotService:
             return False
         return default
 
+    @staticmethod
+    def _strip_accents(text: str) -> str:
+        raw = str(text or "")
+        normalized = unicodedata.normalize("NFD", raw)
+        return "".join(ch for ch in normalized if unicodedata.category(ch) != "Mn")
+
+    def _normalize_user_reply(self, text: str) -> str:
+        body = self._strip_accents(text).lower()
+        body = re.sub(r"[^a-z0-9 ]+", " ", body)
+        body = re.sub(r"\s+", " ", body).strip()
+        return body
+
+    def _create_permission_confirmation(
+        self,
+        chat_id: str,
+        requests: list[dict],
+    ) -> dict:
+        permission_names = []
+        seen = set()
+        for req in requests or []:
+            raw = str((req or {}).get("missing_names") or "").strip()
+            for part in [x.strip().lower() for x in raw.split(",") if x.strip()]:
+                if part in seen:
+                    continue
+                seen.add(part)
+                permission_names.append(part)
+        payload = {
+            "chat_id": str(chat_id),
+            "created_at": time.time(),
+            "requests": requests[: self.MAX_RUNTIME_ACTION_DIRECTIVES],
+            "permission_names": permission_names,
+        }
+        self._pending_permission_confirmations[str(chat_id)] = payload
+        return payload
+
+    def _is_permission_confirmation_expired(self, pending: dict) -> bool:
+        created_at = float((pending or {}).get("created_at") or 0.0)
+        return (time.time() - created_at) > self.PERMISSION_CONFIRM_TTL_SEC
+
     def _extract_runtime_action_directives(self, text: str) -> tuple[str, list[dict]]:
         directives: list[dict] = []
 
@@ -583,8 +625,13 @@ class TelegramBotService:
     ) -> dict:
         notes: list[str] = []
         artifact_paths: list[str] = []
+        permission_confirmation_requests: list[dict] = []
         if not directives:
-            return {"notes": notes, "artifact_paths": artifact_paths}
+            return {
+                "notes": notes,
+                "artifact_paths": artifact_paths,
+                "permission_confirmation_requests": permission_confirmation_requests,
+            }
 
         for item in directives[: self.MAX_RUNTIME_ACTION_DIRECTIVES]:
             skill_id = str((item or {}).get("skill_id") or "omnimind-runtime").strip() or "omnimind-runtime"
@@ -595,11 +642,14 @@ class TelegramBotService:
                 continue
 
             transport.send_text_chunks(chat_id, f"⚙️ OmniMind đang thực thi action: `{action_id}`...")
+            # Luôn preflight trước với auto_request=False để không tự động mở quyền ngay.
+            # Nếu thiếu quyền và directive có auto_request_permissions=true,
+            # sẽ chuyển qua luồng xác nhận 2 bước từ Telegram.
             result = self._skill_manager.execute_builtin_skill_action(
                 skill_id=skill_id,
                 action_id=action_id,
                 payload=payload,
-                auto_request_permissions=auto_request,
+                auto_request_permissions=False,
             )
 
             if result.get("success"):
@@ -628,13 +678,25 @@ class TelegramBotService:
                 missing_names = ", ".join(
                     sorted({str(x.get("permission") or "").strip() for x in missing if str(x.get("permission") or "").strip()})
                 )
-                detail = f"\nQuyền còn thiếu: {missing_names}" if missing_names else ""
-                transport.send_text_chunks(
-                    chat_id,
-                    f"🛡️ OmniMind chưa thể chạy action `{action_id}` do thiếu quyền hệ thống."
-                    f"{detail}\n{msg}",
-                )
-                notes.append(f"{action_id}: permission_required - {missing_names or msg}")
+                if auto_request:
+                    permission_confirmation_requests.append(
+                        {
+                            "skill_id": skill_id,
+                            "action_id": action_id,
+                            "payload": payload,
+                            "missing_names": missing_names,
+                            "message": msg,
+                        }
+                    )
+                    notes.append(f"{action_id}: permission_confirmation_pending - {missing_names or msg}")
+                else:
+                    detail = f"\nQuyền còn thiếu: {missing_names}" if missing_names else ""
+                    transport.send_text_chunks(
+                        chat_id,
+                        f"🛡️ OmniMind chưa thể chạy action `{action_id}` do thiếu quyền hệ thống."
+                        f"{detail}\n{msg}",
+                    )
+                    notes.append(f"{action_id}: permission_required - {missing_names or msg}")
             else:
                 transport.send_text_chunks(
                     chat_id,
@@ -642,7 +704,33 @@ class TelegramBotService:
                 )
                 notes.append(f"{action_id}: failed - {msg}")
 
-        return {"notes": notes, "artifact_paths": artifact_paths}
+        if permission_confirmation_requests:
+            pending = self._create_permission_confirmation(chat_id=chat_id, requests=permission_confirmation_requests)
+            lines = []
+            for req in permission_confirmation_requests:
+                action = str(req.get("action_id") or "")
+                missing = str(req.get("missing_names") or "").strip()
+                if missing:
+                    lines.append(f"- {action}: cần quyền {missing}")
+                else:
+                    lines.append(f"- {action}: cần thêm quyền hệ thống")
+            detail = "\n".join(lines).strip()
+            transport.send_text_chunks(
+                chat_id,
+                (
+                    "🛡️ OmniMind cần xin quyền hệ thống trước khi chạy action.\n"
+                    f"{detail}\n\n"
+                    "Xác nhận 2 bước qua Telegram:\n"
+                    "1) Kiểm tra kỹ tên quyền bên trên\n"
+                    "2) Trả lời `đồng ý` để tiếp tục xin quyền, hoặc `hủy` để từ chối"
+                ),
+            )
+
+        return {
+            "notes": notes,
+            "artifact_paths": artifact_paths,
+            "permission_confirmation_requests": permission_confirmation_requests,
+        }
 
     def _extract_paths_from_recent_messages(self, recent_messages: list[dict], max_messages: int = 8) -> list[str]:
         out: list[str] = []
@@ -656,6 +744,117 @@ class TelegramBotService:
                 seen.add(path)
                 out.append(path)
         return out
+
+    def _execute_confirmed_permission_requests(
+        self,
+        transport: TelegramStreamTransport,
+        chat_id: str,
+        requests: list[dict],
+    ):
+        if not requests:
+            return
+        transport.send_text_chunks(chat_id, "Đã nhận xác nhận. OmniMind bắt đầu xin quyền và chạy action...")
+        for req in requests[: self.MAX_RUNTIME_ACTION_DIRECTIVES]:
+            skill_id = str((req or {}).get("skill_id") or "omnimind-runtime").strip() or "omnimind-runtime"
+            action_id = str((req or {}).get("action_id") or "").strip().lower()
+            payload = (req or {}).get("payload") if isinstance((req or {}).get("payload"), dict) else {}
+            if not action_id:
+                continue
+
+            result = self._skill_manager.execute_builtin_skill_action(
+                skill_id=skill_id,
+                action_id=action_id,
+                payload=payload,
+                auto_request_permissions=True,
+            )
+
+            if result.get("success"):
+                msg = str(result.get("message") or "Action chạy thành công.").strip()
+                artifact_path = str(result.get("artifact_path") or "").strip()
+                if artifact_path:
+                    msg = f"{msg}\nĐầu ra: {artifact_path}"
+                transport.send_text_chunks(chat_id, f"✅ OmniMind đã chạy action `{action_id}` sau khi xác nhận quyền.\n{msg}")
+                continue
+
+            code = str(result.get("code") or "").strip()
+            msg = str(result.get("message") or "Action thất bại.").strip()
+            if code == "PERMISSION_REQUIRED":
+                preflight = result.get("preflight") or {}
+                missing = preflight.get("missing_permissions") or []
+                missing_names = ", ".join(
+                    sorted({str(x.get("permission") or "").strip() for x in missing if str(x.get("permission") or "").strip()})
+                )
+                detail = f"\nQuyền còn thiếu: {missing_names}" if missing_names else ""
+                transport.send_text_chunks(
+                    chat_id,
+                    f"🛡️ Action `{action_id}` vẫn chưa chạy được do quyền chưa được cấp đầy đủ."
+                    f"{detail}\n{msg}",
+                )
+            else:
+                transport.send_text_chunks(
+                    chat_id,
+                    f"❌ OmniMind chạy action `{action_id}` thất bại sau bước xác nhận quyền.\n{msg}",
+                )
+
+    def _handle_permission_confirmation_message(
+        self,
+        transport: TelegramStreamTransport,
+        chat_id: str,
+        user_text: str,
+    ) -> bool:
+        key = str(chat_id)
+        pending = self._pending_permission_confirmations.get(key)
+        if not pending:
+            return False
+
+        normalized = self._normalize_user_reply(user_text)
+        is_confirm = normalized in {
+            "dong y",
+            "dongy",
+            "dong y cap quyen",
+            "ok",
+            "ok dong y",
+            "xac nhan",
+            "chap nhan",
+            "yes",
+            "agree",
+        }
+        is_cancel = normalized in {
+            "huy",
+            "khong",
+            "khong dong y",
+            "tu choi",
+            "cancel",
+            "no",
+        }
+
+        if not (is_confirm or is_cancel):
+            return False
+
+        if self._is_permission_confirmation_expired(pending):
+            self._pending_permission_confirmations.pop(key, None)
+            transport.send_text_chunks(
+                chat_id,
+                "Yêu cầu xác nhận quyền đã hết hạn. Nếu vẫn cần thao tác này, hãy yêu cầu lại để OmniMind tạo phiên xác nhận mới.",
+            )
+            return True
+
+        if is_cancel:
+            self._pending_permission_confirmations.pop(key, None)
+            transport.send_text_chunks(chat_id, "Đã hủy yêu cầu xin quyền hệ thống.")
+            return True
+
+        if is_confirm:
+            requests = list((pending or {}).get("requests") or [])
+            self._pending_permission_confirmations.pop(key, None)
+            self._execute_confirmed_permission_requests(
+                transport=transport,
+                chat_id=chat_id,
+                requests=requests,
+            )
+            return True
+
+        return False
 
     @staticmethod
     def _resolve_directive_path(raw_path: str, recent_paths: list[str]) -> str:
@@ -1093,6 +1292,7 @@ class TelegramBotService:
             "Khi cần chạy action, thêm đúng 1 dòng lệnh máy ở CUỐI câu trả lời:\n"
             "[[OMNIMIND_RUN_ACTION:action_id=<action_id>;payload_json=<json>;auto_request_permissions=true]]\n"
             "Ví dụ payload_json: {\"text\":\"xin chào\"} hoặc {\"confirm\":true,\"dry_run\":true}.\n"
+            "Nếu action cần quyền hệ thống, OmniMind sẽ yêu cầu user xác nhận 2 bước qua Telegram trước khi xin quyền.\n"
             "Không tự ý chạy action nguy hiểm nếu người dùng chưa xác nhận rõ."
         )
         prompt_parts.append(f"Tên hiển thị người dùng: {display_name}")
@@ -1351,6 +1551,13 @@ class TelegramBotService:
         assistant_external_id = f"tg:{update_id}:assistant"
 
         try:
+            if self._handle_permission_confirmation_message(
+                transport=transport,
+                chat_id=chat_id,
+                user_text=user_text,
+            ):
+                return
+
             prompt, context = self._build_codex_prompt(user_text)
             raw_response, draft_id = self._stream_codex_response(
                 transport,

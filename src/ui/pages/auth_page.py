@@ -1374,6 +1374,44 @@ class AuthPage(QWidget):
                 "Vui lòng cấu hình thủ công.",
             )
 
+        # Đồng bộ lại checkbox theo trạng thái thật của OS (nếu probe được),
+        # tránh trạng thái UI "đã cấp" nhưng hệ thống chưa cấp quyền.
+        self._sync_permission_checkbox_after_request(perm_type, open_mode)
+
+    def _sync_permission_checkbox_after_request(self, perm_type: str, open_mode: str):
+        if not self.permission_manager:
+            return
+        widget_map = {
+            "accessibility": self.perm_accessibility,
+            "screenshot": self.perm_screenshot,
+            "camera": self.perm_camera,
+        }
+        cfg_key_map = {
+            "accessibility": "perm_accessibility",
+            "screenshot": "perm_screenshot",
+            "camera": "perm_camera",
+        }
+        w = widget_map.get(perm_type)
+        cfg_key = cfg_key_map.get(perm_type)
+        if not w or not cfg_key:
+            return
+
+        state = self.permission_manager.get_permission_state(perm_type)
+        # Probe được granted -> giữ checked.
+        if state is True:
+            w.blockSignals(True)
+            w.setChecked(True)
+            w.blockSignals(False)
+            ConfigManager.set(cfg_key, "True")
+            return
+
+        # Chỉ rollback checkbox khi mở settings thất bại, hoặc state đã xác định là denied.
+        if open_mode == "failed" or state is False:
+            w.blockSignals(True)
+            w.setChecked(False)
+            w.blockSignals(False)
+            ConfigManager.set(cfg_key, "False")
+
     def _toggle_auto_start(self, is_enabled: bool):
         """Xử lý Logic tự khởi động cùng OS"""
         import platform, os
