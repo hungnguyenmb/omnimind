@@ -33,7 +33,7 @@ Giam kha nang reverse runtime Python o ban phat hanh va chuyen luong release san
 
 ### Local Windows
 ```powershell
-python scripts/release/build_hardened.py `
+.\.venv-build\Scripts\python.exe scripts/release/build_hardened.py `
   --target windows `
   --version v1.1.0 `
   --obfuscate pyarmor `
@@ -42,7 +42,7 @@ python scripts/release/build_hardened.py `
 
 ### Local macOS
 ```bash
-python3 scripts/release/build_hardened.py \
+./.venv-build/bin/python scripts/release/build_hardened.py \
   --target macos \
   --version v1.1.0 \
   --obfuscate pyarmor \
@@ -81,9 +81,30 @@ python3 scripts/release/build_hardened.py \
   - Giu ban build non-obfuscated cho noi bo QA
   - Tach artefact release/public va artefact debug noi bo
 
+### 5. Rui ro mat dependency `cryptography` trong artifact
+- **Muc do: Cao**
+- Nguyen nhan:
+  - Chay build bang Python/PyInstaller global thay vi interpreter trong `.venv-build`.
+  - Build step co the pass nhung artifact crash ngay luc mo app voi loi `ModuleNotFoundError: No module named 'cryptography'`.
+- Giam thieu bat buoc:
+  - Luon chay build qua `./.venv-build/bin/python` tren macOS hoac `.\.venv-build\Scripts\python.exe` tren Windows.
+  - `scripts/release/build_hardened.py` phai duoc goi boi interpreter cua `.venv-build` de `python -m PyInstaller` dung cung environment voi dependency build.
+  - Khong goi `pyinstaller` global tu PATH.
+  - Smoke-test binary ngay sau build truoc khi gui artifact.
+
+Smoke test toi thieu sau build macOS:
+```bash
+tmpdir=$(mktemp -d /tmp/omnimind-smoke.XXXXXX)
+unzip -q release-artifacts/OmniMind-macos-<version>.zip -d "$tmpdir"
+"$tmpdir/OmniMind.app/Contents/MacOS/OmniMind"
+```
+
+Neu stderr co `ModuleNotFoundError: No module named 'cryptography'` thi artifact khong duoc phat hanh.
+
 ## Checklist truoc release
 - [ ] Build `obfuscate=none` pass
 - [ ] Build `obfuscate=pyarmor` pass
+- [ ] Build duoc chay bang Python trong `.venv-build`, khong dung `pyinstaller` global
 - [ ] App mo len duoc, dang nhap Codex duoc
 - [ ] Telegram bot nhan va tra loi duoc
 - [ ] Installer windows cai/chay/go bo binh thuong

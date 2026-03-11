@@ -3,6 +3,7 @@ import platform
 from engine.config_manager import ConfigManager
 from engine.update_manager import UpdateManager
 from engine.telegram_bot_service import get_global_telegram_bot_service
+from engine.zalo_bot_service import get_global_zalo_bot_service
 from engine.zalo_connection_monitor import get_global_zalo_connection_monitor
 
 logger = logging.getLogger(__name__)
@@ -84,6 +85,19 @@ class DashboardManager:
         monitor = get_global_zalo_connection_monitor()
         monitor.start()
         return monitor.get_status()
+
+    def start_zalo_bot(self) -> dict:
+        return get_global_zalo_bot_service().start()
+
+    def stop_zalo_bot(self) -> dict:
+        return get_global_zalo_bot_service().stop()
+
+    def restart_zalo_bot(self) -> dict:
+        return get_global_zalo_bot_service().restart()
+
+    def get_zalo_bot_status(self) -> dict:
+        service = get_global_zalo_bot_service()
+        return service.get_status()
 
     def get_system_info(self) -> dict:
         """Lấy thông tin hệ thống cho Dashboard."""

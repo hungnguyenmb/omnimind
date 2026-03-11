@@ -13,7 +13,12 @@ Write-Host "  Version  : $Version"
 Write-Host "  Obfuscate: $Obfuscate"
 Write-Host "  Package  : $Package"
 
-python scripts/release/build_hardened.py `
+$PythonExe = ".\.venv-build\Scripts\python.exe"
+if (-not (Test-Path $PythonExe)) {
+  throw "Missing .venv-build Python. Tao environment build truoc khi chay wrapper."
+}
+
+& $PythonExe scripts/release/build_hardened.py `
   --target windows `
   --version $Version `
   --obfuscate $Obfuscate `

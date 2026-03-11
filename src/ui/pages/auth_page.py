@@ -5,7 +5,8 @@ Form Token Telegram, Workspace Path, OmniMind Config, Auto-start.
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QLineEdit, QComboBox, QFrame, QGraphicsDropShadowEffect,
-    QCheckBox, QFileDialog, QScrollArea, QMessageBox, QProgressBar, QSizePolicy
+    QCheckBox, QFileDialog, QScrollArea, QMessageBox, QProgressBar, QSizePolicy,
+    QTextEdit, QListWidget, QListWidgetItem
 )
 from PyQt5.QtCore import Qt, QSize, QThread, pyqtSignal, QTimer
 from PyQt5.QtGui import QColor
@@ -14,6 +15,7 @@ from engine.config_manager import ConfigManager
 from engine.environment_manager import EnvironmentManager
 from engine.openzca_manager import OpenZcaManager
 from engine.permission_manager import PermissionManager
+from engine.zalo_bot_service import get_global_zalo_bot_service
 from engine.zalo_connection_monitor import get_global_zalo_connection_monitor
 import logging
 import time
@@ -215,6 +217,50 @@ class ZaloStatusWorker(QThread):
         self.finished.emit(result)
 
 
+class ZaloBotWorker(QThread):
+    finished = pyqtSignal(dict)
+
+    def __init__(self, operation: str, parent=None):
+        super().__init__(parent)
+        self.operation = str(operation or "status").strip().lower()
+
+    def run(self):
+        service = get_global_zalo_bot_service()
+        try:
+            if self.operation == "start":
+                result = service.start()
+            elif self.operation == "restart":
+                result = service.restart()
+            elif self.operation == "stop":
+                result = service.stop()
+            else:
+                result = service.get_status()
+                result = {"success": True, **(result or {})}
+        except Exception as e:
+            logger.exception("Zalo bot worker failed")
+            result = {"success": False, "message": f"Lỗi bot Zalo: {str(e)[:120]}"}
+        self.finished.emit(result)
+
+
+class ZaloGroupListWorker(QThread):
+    finished = pyqtSignal(dict)
+
+    def __init__(self, manager: OpenZcaManager | None, parent=None):
+        super().__init__(parent)
+        self.manager = manager
+
+    def run(self):
+        if self.manager is None:
+            self.finished.emit({"success": False, "groups": [], "message": "Không thể khởi tạo môi trường Zalo."})
+            return
+        try:
+            result = self.manager.list_groups()
+        except Exception as e:
+            logger.exception("Zalo group list worker failed")
+            result = {"success": False, "groups": [], "message": f"Lỗi tải nhóm Zalo: {str(e)[:120]}"}
+        self.finished.emit(result)
+
+
 class AuthPage(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -224,7 +270,10 @@ class AuthPage(QWidget):
         self._openzca_worker = None
         self._openzca_auth_worker = None
         self._zalo_status_worker = None
+        self._zalo_bot_worker = None
+        self._zalo_group_worker = None
         self._pending_openzca_auth_op = ""
+        self._pending_zalo_bot_op = ""
         self._last_zalo_auto_refresh_ts = 0.0
         self._missing_runtime = []
         self._runtime_installing = False
@@ -473,6 +522,119 @@ class AuthPage(QWidget):
         zalo_auth_btn_row.addStretch()
         zalo_layout.addLayout(zalo_auth_btn_row)
 
+        bot_sep = QFrame()
+        bot_sep.setFrameShape(QFrame.HLine)
+        bot_sep.setStyleSheet("color: #E2E8F0;")
+        zalo_layout.addWidget(bot_sep)
+
+        self.zalo_bot_status_label = QLabel("Trạng thái bot: Đã dừng")
+        self.zalo_bot_status_label.setStyleSheet("font-size: 14px; font-weight: 600; color: #64748B;")
+        self.zalo_bot_status_label.setWordWrap(True)
+        zalo_layout.addWidget(self.zalo_bot_status_label)
+
+        self.zalo_bot_hint = QLabel("Bot Zalo chưa chạy. Hãy đăng nhập Zalo trước, sau đó bật bot để bắt đầu nhận và trả lời tin nhắn.")
+        self.zalo_bot_hint.setStyleSheet("font-size: 12px; color: #64748B;")
+        self.zalo_bot_hint.setWordWrap(True)
+        zalo_layout.addWidget(self.zalo_bot_hint)
+
+        self.zalo_auto_reply_check = QCheckBox("  Tự động trả lời tin nhắn Zalo")
+        self.zalo_auto_reply_check.setObjectName("FormCheck")
+        self.zalo_auto_reply_check.setStyleSheet("font-size: 14px; color: #334155; padding: 6px 0;")
+        zalo_layout.addWidget(self.zalo_auto_reply_check)
+
+        zalo_layout.addWidget(self._create_field_label("Model trả lời Zalo"))
+        self.zalo_model_combo = QComboBox()
+        self.zalo_model_combo.setObjectName("FormCombo")
+        self.zalo_model_combo.setEditable(False)
+        self.zalo_model_combo.setInsertPolicy(QComboBox.NoInsert)
+        self.zalo_model_combo.setMaxVisibleItems(10)
+        self.zalo_model_combo.addItem("gpt-5-codex-mini (nhanh, khuyến nghị)", "gpt-5-codex-mini")
+        self.zalo_model_combo.addItem("gpt-5 (đa dụng)", "gpt-5")
+        self.zalo_model_combo.addItem("gpt-5.1-codex-mini", "gpt-5.1-codex-mini")
+        self.zalo_model_combo.addItem("gpt-5-codex", "gpt-5-codex")
+        self.zalo_model_combo.addItem("gpt-5.1-codex", "gpt-5.1-codex")
+        self.zalo_model_combo.addItem("gpt-5.2-codex", "gpt-5.2-codex")
+        self.zalo_model_combo.addItem("gpt-5.3-codex", "gpt-5.3-codex")
+        self.zalo_model_combo.addItem("gpt-5.4", "gpt-5.4")
+        self.zalo_model_combo.setFixedHeight(40)
+        zalo_layout.addWidget(self.zalo_model_combo)
+
+        zalo_layout.addWidget(self._create_field_label("Phạm vi nhóm"))
+        self.zalo_group_scope_combo = QComboBox()
+        self.zalo_group_scope_combo.setObjectName("FormCombo")
+        self.zalo_group_scope_combo.setFixedHeight(40)
+        self.zalo_group_scope_combo.addItem("Tất cả nhóm", "all")
+        self.zalo_group_scope_combo.addItem("Nhóm được chọn", "selected")
+        self.zalo_group_scope_combo.currentIndexChanged.connect(self._sync_zalo_group_scope_ui)
+        zalo_layout.addWidget(self.zalo_group_scope_combo)
+
+        group_btn_row = QHBoxLayout()
+        self.zalo_refresh_groups_btn = QPushButton("  Làm mới danh sách nhóm")
+        self.zalo_refresh_groups_btn.setObjectName("SecondaryBtn")
+        self.zalo_refresh_groups_btn.setIcon(Icons.refresh("#3B82F6", 16))
+        self.zalo_refresh_groups_btn.setCursor(Qt.PointingHandCursor)
+        self.zalo_refresh_groups_btn.setFixedHeight(36)
+        self.zalo_refresh_groups_btn.clicked.connect(self._refresh_zalo_groups)
+        group_btn_row.addWidget(self.zalo_refresh_groups_btn)
+        group_btn_row.addStretch()
+        zalo_layout.addLayout(group_btn_row)
+
+        self.zalo_group_status_label = QLabel("")
+        self.zalo_group_status_label.setStyleSheet("font-size: 12px; color: #64748B;")
+        self.zalo_group_status_label.setWordWrap(True)
+        self.zalo_group_status_label.setVisible(False)
+        zalo_layout.addWidget(self.zalo_group_status_label)
+
+        self.zalo_group_list = QListWidget()
+        self.zalo_group_list.setMinimumHeight(120)
+        self.zalo_group_list.setStyleSheet(
+            "QListWidget { border: 1px solid #CBD5E1; border-radius: 10px; padding: 6px; background: #FFFFFF; color: #0F172A; }"
+            "QListWidget::item { padding: 6px; }"
+        )
+        zalo_layout.addWidget(self.zalo_group_list)
+
+        self.zalo_group_manual_input = QLineEdit()
+        self.zalo_group_manual_input.setObjectName("FormInput")
+        self.zalo_group_manual_input.setPlaceholderText("Fallback: nhập threadId nhóm, cách nhau bằng dấu phẩy")
+        self.zalo_group_manual_input.setFixedHeight(40)
+        zalo_layout.addWidget(self.zalo_group_manual_input)
+
+        zalo_layout.addWidget(self._create_field_label("Nguyên tắc trả lời Zalo"))
+        self.zalo_prompt_input = QTextEdit()
+        self.zalo_prompt_input.setPlaceholderText("Ví dụ: trả lời ngắn gọn, lịch sự, ưu tiên tiếng Việt, không tự nhận làm được việc chưa thực hiện...")
+        self.zalo_prompt_input.setMinimumHeight(96)
+        self.zalo_prompt_input.setStyleSheet(
+            "QTextEdit { border: 1px solid #CBD5E1; border-radius: 12px; padding: 10px; background: #FFFFFF; color: #0F172A; }"
+        )
+        zalo_layout.addWidget(self.zalo_prompt_input)
+
+        zalo_bot_btn_row = QHBoxLayout()
+        self.zalo_start_bot_btn = QPushButton("  Bật bot Zalo")
+        self.zalo_start_bot_btn.setObjectName("PrimaryBtn")
+        self.zalo_start_bot_btn.setIcon(Icons.power("#FFFFFF", 16))
+        self.zalo_start_bot_btn.setCursor(Qt.PointingHandCursor)
+        self.zalo_start_bot_btn.setFixedHeight(40)
+        self.zalo_start_bot_btn.clicked.connect(self._start_zalo_bot)
+        zalo_bot_btn_row.addWidget(self.zalo_start_bot_btn)
+
+        self.zalo_restart_bot_btn = QPushButton("  Khởi động lại bot")
+        self.zalo_restart_bot_btn.setObjectName("SecondaryBtn")
+        self.zalo_restart_bot_btn.setIcon(Icons.refresh("#3B82F6", 16))
+        self.zalo_restart_bot_btn.setCursor(Qt.PointingHandCursor)
+        self.zalo_restart_bot_btn.setFixedHeight(40)
+        self.zalo_restart_bot_btn.clicked.connect(self._restart_zalo_bot)
+        zalo_bot_btn_row.addWidget(self.zalo_restart_bot_btn)
+
+        self.zalo_stop_bot_btn = QPushButton("  Tắt bot Zalo")
+        self.zalo_stop_bot_btn.setObjectName("SecondaryBtn")
+        self.zalo_stop_bot_btn.setIcon(Icons.power("#EF4444", 16))
+        self.zalo_stop_bot_btn.setCursor(Qt.PointingHandCursor)
+        self.zalo_stop_bot_btn.setFixedHeight(40)
+        self.zalo_stop_bot_btn.clicked.connect(self._stop_zalo_bot)
+        zalo_bot_btn_row.addWidget(self.zalo_stop_bot_btn)
+        zalo_bot_btn_row.addStretch()
+        zalo_layout.addLayout(zalo_bot_btn_row)
+
         layout.addWidget(zalo_card)
 
         # ── OmniMind CLI Authentication Card ──
@@ -661,6 +823,8 @@ class AuthPage(QWidget):
         self._zalo_status_timer.timeout.connect(self._tick_zalo_status)
         self._zalo_status_timer.start()
         self._sync_zalo_status_display()
+        self._sync_zalo_bot_status_display()
+        self._sync_zalo_group_scope_ui()
 
         # ── Security & Preferences Card ──
         sec_card = self._create_card("🛡  Bảo mật & Tuỳ chọn")
@@ -870,14 +1034,20 @@ class AuthPage(QWidget):
             self._openzca_worker,
             self._openzca_auth_worker,
             self._zalo_status_worker,
+            self._zalo_bot_worker,
+            self._zalo_group_worker,
         )
         return any(worker and worker.isRunning() for worker in workers)
 
     def _sync_zalo_button_states(self):
         status = self.zalo_monitor.get_status() if self.zalo_monitor else ConfigManager.get_zalo_connection_status()
+        bot_status = get_global_zalo_bot_service().get_status()
         state = str(status.get("login_state") or "not_logged_in")
         runtime_ready = str(status.get("install_status") or "").strip().lower() == "ready"
         busy = self._has_active_zalo_worker()
+        listener_state = str(bot_status.get("state") or "stopped")
+        listener_running = bool(bot_status.get("running"))
+        connected = state == "connected"
 
         self.zalo_check_btn.setEnabled(not busy)
         self.zalo_install_btn.setEnabled(not busy)
@@ -891,9 +1061,113 @@ class AuthPage(QWidget):
         self.zalo_login_btn.setEnabled(not busy and self.zalo_login_btn.isVisible())
         self.zalo_relogin_btn.setEnabled(not busy and self.zalo_relogin_btn.isVisible())
         self.zalo_logout_btn.setEnabled(not busy and self.zalo_logout_btn.isVisible())
+        self.zalo_refresh_groups_btn.setEnabled(not busy and connected)
+        self.zalo_group_scope_combo.setEnabled(not busy)
+        self.zalo_group_list.setEnabled(not busy)
+        self.zalo_group_manual_input.setEnabled(not busy)
+        self.zalo_prompt_input.setEnabled(not busy)
+        self.zalo_auto_reply_check.setEnabled(not busy)
+        self.zalo_model_combo.setEnabled(not busy)
+        self.zalo_start_bot_btn.setEnabled(not busy and runtime_ready and connected and not listener_running)
+        self.zalo_restart_bot_btn.setEnabled(not busy and runtime_ready and connected and listener_running)
+        self.zalo_stop_bot_btn.setEnabled(not busy and listener_running)
+        self.zalo_start_bot_btn.setVisible(listener_state in {"stopped", "crashed"})
+        self.zalo_restart_bot_btn.setVisible(listener_running)
+        self.zalo_stop_bot_btn.setVisible(listener_running)
+        self._sync_zalo_group_scope_ui()
+
+    def _sync_zalo_group_scope_ui(self):
+        selected_mode = (self.zalo_group_scope_combo.currentData() or "all") == "selected"
+        self.zalo_group_list.setVisible(selected_mode)
+        self.zalo_group_manual_input.setVisible(selected_mode)
+        self.zalo_refresh_groups_btn.setVisible(selected_mode)
+        self.zalo_group_status_label.setVisible(selected_mode and bool(self.zalo_group_status_label.text().strip()))
+
+    def _sync_zalo_bot_status_display(self):
+        status = get_global_zalo_bot_service().get_status()
+        state = str(status.get("state") or "stopped")
+        color_map = {
+            "running": "#10B981",
+            "starting": "#3B82F6",
+            "restarting": "#F59E0B",
+            "crashed": "#EF4444",
+            "stopped": "#64748B",
+        }
+        text_map = {
+            "running": "Đang chạy",
+            "starting": "Đang khởi động",
+            "restarting": "Đang khởi động lại",
+            "crashed": "Bị lỗi",
+            "stopped": "Đã dừng",
+        }
+        self.zalo_bot_status_label.setText(f"Trạng thái bot: {text_map.get(state, 'Đã dừng')}")
+        self.zalo_bot_status_label.setStyleSheet(
+            f"font-size: 14px; font-weight: 600; color: {color_map.get(state, '#64748B')};"
+        )
+        if state == "running":
+            self.zalo_bot_hint.setText("Bot Zalo đang lắng nghe tin nhắn mới và sẽ trả lời DM hoặc nhóm được @mention theo cấu hình hiện tại.")
+        elif state == "crashed":
+            self.zalo_bot_hint.setText(str(status.get("last_error") or "Bot Zalo đã dừng do lỗi."))
+        elif state in {"starting", "restarting"}:
+            self.zalo_bot_hint.setText("Bot Zalo đang được khởi tạo. Vui lòng chờ vài giây.")
+        else:
+            self.zalo_bot_hint.setText("Bot Zalo chưa chạy. Hãy đăng nhập Zalo trước, sau đó bật bot để bắt đầu nhận và trả lời tin nhắn.")
+
+    def _run_zalo_bot_worker(self, operation: str):
+        if self._has_active_zalo_worker():
+            return
+        self._pending_zalo_bot_op = str(operation or "").strip().lower()
+        self._set_openzca_actions_enabled(False)
+        self._set_openzca_auth_actions_enabled(False)
+        self.zalo_refresh_groups_btn.setEnabled(False)
+        self.zalo_start_bot_btn.setEnabled(False)
+        self.zalo_restart_bot_btn.setEnabled(False)
+        self.zalo_stop_bot_btn.setEnabled(False)
+        status_map = {
+            "start": ("Trạng thái bot: Đang mở bot...", "#3B82F6", "Đang mở bot Zalo và kết nối bộ lắng nghe. Vui lòng chờ..."),
+            "restart": ("Trạng thái bot: Đang khởi động lại", "#F59E0B", "Đang khởi động lại bot Zalo. Vui lòng chờ..."),
+            "stop": ("Trạng thái bot: Đang tắt bot", "#64748B", "Đang dừng bot Zalo. Vui lòng chờ..."),
+        }
+        label, color, hint = status_map.get(
+            self._pending_zalo_bot_op,
+            ("Trạng thái bot: Đang cập nhật", "#3B82F6", "Đang cập nhật bot Zalo..."),
+        )
+        self.zalo_bot_status_label.setText(label)
+        self.zalo_bot_status_label.setStyleSheet(f"font-size: 14px; font-weight: 600; color: {color};")
+        self.zalo_bot_hint.setText(hint)
+        self._zalo_bot_worker = ZaloBotWorker(self._pending_zalo_bot_op, self)
+        self._zalo_bot_worker.finished.connect(self._on_zalo_bot_worker_finished)
+        self._zalo_bot_worker.start()
+
+    def _start_zalo_bot(self):
+        self._persist_zalo_bot_settings_from_ui()
+        self._run_zalo_bot_worker("start")
+
+    def _restart_zalo_bot(self):
+        self._persist_zalo_bot_settings_from_ui()
+        self._run_zalo_bot_worker("restart")
+
+    def _stop_zalo_bot(self):
+        self._run_zalo_bot_worker("stop")
+
+    def _refresh_zalo_groups(self):
+        if self._has_active_zalo_worker():
+            return
+        self._set_openzca_actions_enabled(False)
+        self._set_openzca_auth_actions_enabled(False)
+        self.zalo_refresh_groups_btn.setEnabled(False)
+        self.zalo_refresh_groups_btn.setText("  Đang tải dữ liệu...")
+        self.zalo_group_status_label.setText("Đang tải dữ liệu danh sách nhóm từ Zalo. Vui lòng chờ...")
+        self.zalo_group_status_label.setStyleSheet("font-size: 12px; color: #3B82F6;")
+        self.zalo_group_status_label.setVisible(True)
+        self.zalo_bot_hint.setText("Đang tải danh sách nhóm Zalo...")
+        self._zalo_group_worker = ZaloGroupListWorker(self.openzca_manager, self)
+        self._zalo_group_worker.finished.connect(self._on_zalo_groups_finished)
+        self._zalo_group_worker.start()
 
     def _tick_zalo_status(self):
         self._sync_zalo_status_display()
+        self._sync_zalo_bot_status_display()
         status = self.zalo_monitor.get_status() if self.zalo_monitor else ConfigManager.get_zalo_connection_status()
         if str(status.get("login_state") or "not_logged_in") != "qr_required":
             return
@@ -1041,6 +1315,7 @@ class AuthPage(QWidget):
         self._set_zalo_runtime_progress(False)
         self._apply_openzca_runtime_status(result or {})
         self._sync_zalo_status_display()
+        self._sync_zalo_bot_status_display()
         self._sync_zalo_button_states()
 
     @staticmethod
@@ -1058,6 +1333,9 @@ class AuthPage(QWidget):
         text = str(message or "").strip()
         if not text:
             return fallback
+        low = text.lower()
+        if low.startswith("profile:") or low.startswith("loggedin:") or low in {"{", "}"}:
+            return fallback or "Ứng dụng chưa đọc được trạng thái Zalo một cách ổn định. Hãy thử cập nhật trạng thái hoặc đăng nhập lại."
         replacements = {
             "OpenZCA": "môi trường Zalo",
             "openzca": "môi trường Zalo",
@@ -1134,6 +1412,7 @@ class AuthPage(QWidget):
                     self.zalo_auth_hint.setText(op_msg or "Thao tác Zalo thất bại.")
 
         self._sync_zalo_status_display()
+        self._sync_zalo_bot_status_display()
         if op == "logout" or result.get("success"):
             self._run_zalo_status_worker()
         else:
@@ -1144,6 +1423,50 @@ class AuthPage(QWidget):
         if not result.get("success") and result.get("message"):
             self.zalo_auth_hint.setText(self._sanitize_zalo_message(result.get("message")))
         self._sync_zalo_status_display()
+        self._sync_zalo_bot_status_display()
+        self._sync_zalo_button_states()
+
+    def _on_zalo_bot_worker_finished(self, result: dict):
+        self._zalo_bot_worker = None
+        if not result.get("success") and result.get("message"):
+            msg = self._sanitize_zalo_message(
+                result.get("message"),
+                "Không thể bật bot Zalo. Hãy kiểm tra lại trạng thái đăng nhập và môi trường kết nối.",
+            )
+            self.zalo_bot_hint.setText(msg)
+            QMessageBox.warning(self, "Bot Zalo", msg)
+        self._sync_zalo_bot_status_display()
+        self._sync_zalo_button_states()
+
+    def _on_zalo_groups_finished(self, result: dict):
+        self._zalo_group_worker = None
+        self.zalo_refresh_groups_btn.setText("  Làm mới danh sách nhóm")
+        self.zalo_group_list.clear()
+        groups = result.get("groups") or []
+        allowlist = set(ConfigManager.get_zalo_group_allowlist())
+        for item in groups:
+            thread_id = str((item or {}).get("thread_id") or "").strip()
+            name = str((item or {}).get("name") or thread_id).strip()
+            total_member = str((item or {}).get("total_member") or "").strip()
+            label = f"{name} ({thread_id})"
+            if total_member:
+                label += f" · {total_member} thành viên"
+            list_item = QListWidgetItem(label)
+            list_item.setData(Qt.UserRole, thread_id)
+            list_item.setFlags(list_item.flags() | Qt.ItemIsUserCheckable)
+            list_item.setCheckState(Qt.Checked if thread_id in allowlist else Qt.Unchecked)
+            self.zalo_group_list.addItem(list_item)
+        if result.get("message"):
+            msg = self._sanitize_zalo_message(result.get("message"))
+            self.zalo_bot_hint.setText(msg)
+            self.zalo_group_status_label.setText(msg)
+            self.zalo_group_status_label.setStyleSheet(
+                f"font-size: 12px; color: {'#10B981' if result.get('success') else '#EF4444'};"
+            )
+            self.zalo_group_status_label.setVisible(bool(msg and self.zalo_group_scope_combo.currentData() == "selected"))
+        else:
+            self.zalo_group_status_label.setVisible(False)
+        self._sync_zalo_bot_status_display()
         self._sync_zalo_button_states()
 
     def _refresh_runtime_installer_status(self, runtime_missing: list):
@@ -1347,6 +1670,34 @@ class AuthPage(QWidget):
         if folder:
             self.workspace_input.setText(folder)
 
+    def _collect_selected_zalo_group_ids(self) -> list[str]:
+        group_ids: list[str] = []
+        seen = set()
+        for idx in range(self.zalo_group_list.count()):
+            item = self.zalo_group_list.item(idx)
+            if item.checkState() != Qt.Checked:
+                continue
+            thread_id = str(item.data(Qt.UserRole) or "").strip()
+            if thread_id and thread_id not in seen:
+                seen.add(thread_id)
+                group_ids.append(thread_id)
+        manual_raw = self.zalo_group_manual_input.text().strip()
+        if manual_raw:
+            for part in [x.strip() for x in manual_raw.split(",") if x.strip()]:
+                if part not in seen:
+                    seen.add(part)
+                    group_ids.append(part)
+        return group_ids
+
+    def _persist_zalo_bot_settings_from_ui(self):
+        ConfigManager.set_zalo_bot_config(
+            auto_reply=self.zalo_auto_reply_check.isChecked(),
+            model=str(self.zalo_model_combo.currentData() or self.zalo_model_combo.currentText() or "").strip(),
+            group_scope=str(self.zalo_group_scope_combo.currentData() or "all"),
+            group_allowlist=self._collect_selected_zalo_group_ids(),
+            prompt_principles=self.zalo_prompt_input.toPlainText().strip(),
+        )
+
     def _detect_system_permission_states(self) -> dict:
         if self.permission_manager:
             return self.permission_manager.get_status()
@@ -1357,6 +1708,7 @@ class AuthPage(QWidget):
         token = ConfigManager.get("telegram_token", "")
         chat_id = ConfigManager.get("telegram_chat_id", "")
         workspace = ConfigManager.get("workspace_path", "")
+        zalo_cfg = ConfigManager.get_zalo_bot_config()
         
         # Load Checkboxes
         auto_start = ConfigManager.get("auto_start", "False") == "True"
@@ -1376,6 +1728,14 @@ class AuthPage(QWidget):
         self.token_input.setText(token)
         self.user_id_input.setText(chat_id)
         self.workspace_input.setText(workspace)
+        self.zalo_auto_reply_check.setChecked(bool(zalo_cfg.get("auto_reply", True)))
+        self._set_codex_combo_value(self.zalo_model_combo, str(zalo_cfg.get("model") or "gpt-5-codex-mini"))
+        scope = str(zalo_cfg.get("group_scope") or "all")
+        idx = self.zalo_group_scope_combo.findData(scope)
+        self.zalo_group_scope_combo.setCurrentIndex(idx if idx >= 0 else 0)
+        self.zalo_prompt_input.setPlainText(str(zalo_cfg.get("prompt_principles") or ""))
+        self.zalo_group_manual_input.setText(", ".join(zalo_cfg.get("group_allowlist") or []))
+        self._sync_zalo_group_scope_ui()
         self._load_codex_cli_preferences()
             
         self.auto_start_check.setChecked(auto_start)
@@ -1396,12 +1756,19 @@ class AuthPage(QWidget):
         ConfigManager.set("perm_accessibility", str(self.perm_accessibility.isChecked()))
         ConfigManager.set("perm_screenshot", str(self.perm_screenshot.isChecked()))
         ConfigManager.set("perm_camera", str(self.perm_camera.isChecked()))
+        self._sync_zalo_bot_status_display()
+        self._sync_zalo_button_states()
 
     def _save_settings(self):
         """Lưu cấu hình từ UI xuống Database."""
         token = self.token_input.text().strip()
         chat_id = self.user_id_input.text().strip()
         workspace = self.workspace_input.text().strip()
+        zalo_group_scope = self.zalo_group_scope_combo.currentData() or "all"
+        zalo_allowlist = self._collect_selected_zalo_group_ids()
+        zalo_prompt = self.zalo_prompt_input.toPlainText().strip()
+        zalo_auto_reply = self.zalo_auto_reply_check.isChecked()
+        zalo_model = str(self.zalo_model_combo.currentData() or self.zalo_model_combo.currentText() or "").strip() or "gpt-5-codex-mini"
         model = self.codex_model_combo.currentText().strip() or "gpt-5.3-codex"
         sandbox_mode = self.codex_sandbox_combo.currentData() or "workspace-write"
         approval_policy = self.codex_approval_combo.currentData() or "on-request"
@@ -1423,6 +1790,13 @@ class AuthPage(QWidget):
         ConfigManager.set("perm_accessibility", perm_acc)
         ConfigManager.set("perm_screenshot", perm_scr)
         ConfigManager.set("perm_camera", perm_cam)
+        ConfigManager.set_zalo_bot_config(
+            auto_reply=zalo_auto_reply,
+            model=zalo_model,
+            group_scope=str(zalo_group_scope),
+            group_allowlist=zalo_allowlist,
+            prompt_principles=zalo_prompt,
+        )
 
         if self.env_manager:
             write_result = self.env_manager.write_codex_cli_preferences(

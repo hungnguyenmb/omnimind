@@ -84,17 +84,40 @@ class CodexRuntimeBridge:
             kwargs["startupinfo"] = startupinfo
         return kwargs
 
-    def _build_command(self, prompt: str) -> list[str]:
+    def _build_command(self, prompt: str, model_override: str = "") -> list[str]:
         codex_cmd = self.env_manager.resolve_codex_command()
         # Ưu tiên app-server để stream event chuẩn; giữ fallback exec nếu app-server lỗi.
         if str(ConfigManager.get("codex_runtime_mode", "app-server")).strip().lower() == "exec":
             # `--skip-git-repo-check` là flag của `codex exec`, không phải global/app-server.
-            return [codex_cmd, "exec", "--skip-git-repo-check", str(prompt or "")]
-        return [codex_cmd, "app-server", "--listen", "stdio://"]
+            cmd = [codex_cmd, "exec"]
+            model = str(model_override or "").strip()
+            if model:
+                cmd.extend(["--model", model])
+            cmd.extend(["--skip-git-repo-check", str(prompt or "")])
+            return cmd
+        cmd = [codex_cmd, "app-server"]
+        model = str(model_override or "").strip()
+        if model:
+            cmd.extend(["-c", f'model="{model}"'])
+        cmd.extend(["--listen", "stdio://"])
+        return cmd
 
-    def _build_exec_command(self, prompt: str) -> list[str]:
+    def _build_exec_command(self, prompt: str, model_override: str = "") -> list[str]:
         codex_cmd = self.env_manager.resolve_codex_command()
-        return [codex_cmd, "exec", "--skip-git-repo-check", str(prompt or "")]
+        cmd = [codex_cmd, "exec"]
+        model = str(model_override or "").strip()
+        if model:
+            cmd.extend(["--model", model])
+        cmd.extend(["--skip-git-repo-check", str(prompt or "")])
+        return cmd
+
+    def _build_runtime_env(self, model_override: str = "") -> dict:
+        env = self.env_manager.get_codex_env()
+        model = str(model_override or "").strip()
+        if model:
+            env["OMNIMIND_CODEX_MODEL"] = model
+            env["CODEX_MODEL"] = model
+        return env
 
     @staticmethod
     def _pump_stream(stream, queue: Queue, tag: str):
@@ -227,10 +250,11 @@ class CodexRuntimeBridge:
         on_chunk: Callable[[str], None] | None = None,
         runtime_event_callback: Callable[[dict[str, Any]], None] | None = None,
         timeout_sec: int = 600,
+        model_override: str = "",
     ) -> dict:
-        cmd = self._build_command(prompt_text)
+        cmd = self._build_command(prompt_text, model_override=model_override)
         cwd = self._resolve_workspace()
-        env = self.env_manager.get_codex_env()
+        env = self._build_runtime_env(model_override=model_override)
         self._emit_event(runtime_event_callback, {"kind": "status", "text": "Đang kết nối OmniMind app-server..."})
 
         proc = subprocess.Popen(
@@ -622,10 +646,11 @@ class CodexRuntimeBridge:
         on_chunk: Callable[[str], None] | None = None,
         runtime_event_callback: Callable[[dict[str, Any]], None] | None = None,
         timeout_sec: int = 600,
+        model_override: str = "",
     ) -> dict:
-        cmd = self._build_exec_command(prompt_text)
+        cmd = self._build_exec_command(prompt_text, model_override=model_override)
         cwd = self._resolve_workspace()
-        env = self.env_manager.get_codex_env()
+        env = self._build_runtime_env(model_override=model_override)
         started_at = time.monotonic()
         chunks: list[str] = []
         self._emit_event(runtime_event_callback, {"kind": "status", "text": "Đang chạy OmniMind fallback exec..."})
@@ -693,6 +718,7 @@ class CodexRuntimeBridge:
         on_chunk: Callable[[str], None] | None = None,
         runtime_event_callback: Callable[[dict[str, Any]], None] | None = None,
         timeout_sec: int = 600,
+        model_override: str = "",
     ) -> dict:
         prompt_text = str(prompt or "").strip()
         if not prompt_text:
@@ -714,6 +740,7 @@ class CodexRuntimeBridge:
                     on_chunk=on_chunk,
                     runtime_event_callback=runtime_event_callback,
                     timeout_sec=timeout_sec,
+                    model_override=model_override,
                 )
                 if result.get("success"):
                     return result
@@ -737,6 +764,7 @@ class CodexRuntimeBridge:
             on_chunk=on_chunk,
             runtime_event_callback=runtime_event_callback,
             timeout_sec=timeout_sec,
+            model_override=model_override,
         )
         if not result.get("success"):
             result["message"] = self._map_known_runtime_error(str(result.get("message") or ""))

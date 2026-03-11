@@ -111,7 +111,7 @@ pyinstaller --clean --noconfirm ... (chạy lại lệnh build)
 Khi cần bản phát hành chính thức (giảm lộ cấu trúc runtime), dùng script hardened:
 
 ```powershell
-python scripts/release/build_hardened.py `
+.\.venv-build\Scripts\python.exe scripts/release/build_hardened.py `
   --target windows `
   --version v1.1.0 `
   --obfuscate pyarmor `
@@ -125,3 +125,22 @@ Hoặc dùng wrapper:
 ```
 
 Nếu chưa muốn obfuscate trong đợt đầu rollout, đặt `--obfuscate none` để giảm rủi ro build/runtime.
+
+## 10. Bài học quan trọng về `cryptography`
+
+Đã từng gặp trường hợp build pass nhưng app crash ngay khi mở, với lỗi:
+
+```text
+ModuleNotFoundError: No module named 'cryptography'
+```
+
+Nguyên nhân:
+- Chạy build bằng Python/PyInstaller global trên máy thay vì environment `.venv-build`.
+
+Nguyên tắc bắt buộc:
+- Hardened build phải chạy bằng `.\.venv-build\Scripts\python.exe`.
+- Không gọi `pyinstaller` global từ `PATH` cho release build.
+
+Kiểm tra nhanh trước khi giao artifact:
+- Mở app từ `dist` hoặc từ file zip vừa build.
+- Nếu app không qua được màn hình khởi động đầu tiên, kiểm tra ngay stderr/log để loại trừ lỗi `cryptography`.

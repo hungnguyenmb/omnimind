@@ -363,7 +363,9 @@ def main():
         logger.warning(f"Could not set app icon: {e}")
 
     from engine.telegram_bot_service import stop_global_telegram_bot_service
+    from engine.zalo_bot_service import get_global_zalo_bot_service, stop_global_zalo_bot_service
     app.aboutToQuit.connect(stop_global_telegram_bot_service)
+    app.aboutToQuit.connect(stop_global_zalo_bot_service)
 
     # Load stylesheet
     try:
@@ -405,6 +407,16 @@ def main():
         window.hide()
     else:
         window.show()
+
+    try:
+        zalo_cfg = ConfigManager.get_zalo_bot_config()
+        zalo_conn = ConfigManager.get_zalo_connection_status()
+        if zalo_cfg.get("enabled") and zalo_conn.get("login_state") == "connected":
+            result = get_global_zalo_bot_service().start()
+            if not result.get("success"):
+                logger.warning(f"Cannot auto-start Zalo bot: {result.get('message')}")
+    except Exception as e:
+        logger.warning(f"Zalo bot auto-start warning: {e}")
     _mark_payload_boot_success()
 
     sys.exit(app.exec_())

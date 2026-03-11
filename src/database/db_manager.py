@@ -317,6 +317,106 @@ class DBManager:
                     ON memory_facts (is_active, importance DESC, updated_at DESC)
                 ''')
 
+                # 15. zalo_threads [CLIENT-SQLITE]
+                cursor.execute('''
+                    CREATE TABLE IF NOT EXISTS zalo_threads (
+                        thread_id TEXT PRIMARY KEY,
+                        chat_type TEXT DEFAULT 'dm',
+                        display_name TEXT DEFAULT '',
+                        participant_hint TEXT DEFAULT '',
+                        last_message_at TEXT DEFAULT '',
+                        last_bootstrap_at TEXT DEFAULT '',
+                        bootstrap_done BOOLEAN DEFAULT 0,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    )
+                ''')
+
+                # 16. zalo_messages [CLIENT-SQLITE]
+                cursor.execute('''
+                    CREATE TABLE IF NOT EXISTS zalo_messages (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        thread_id TEXT NOT NULL,
+                        chat_type TEXT DEFAULT 'dm',
+                        sender_id TEXT DEFAULT '',
+                        message_id TEXT DEFAULT '',
+                        direction TEXT DEFAULT 'inbound',
+                        content TEXT NOT NULL,
+                        mentions_json TEXT DEFAULT '[]',
+                        raw_json TEXT DEFAULT '{}',
+                        timestamp TEXT DEFAULT '',
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    )
+                ''')
+
+                # 17. zalo_thread_summaries [CLIENT-SQLITE]
+                cursor.execute('''
+                    CREATE TABLE IF NOT EXISTS zalo_thread_summaries (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        thread_id TEXT NOT NULL,
+                        summary_text TEXT NOT NULL,
+                        from_ts TEXT DEFAULT '',
+                        to_ts TEXT DEFAULT '',
+                        message_count INTEGER DEFAULT 0,
+                        source TEXT DEFAULT 'auto',
+                        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    )
+                ''')
+
+                # 18. zalo_thread_facts [CLIENT-SQLITE]
+                cursor.execute('''
+                    CREATE TABLE IF NOT EXISTS zalo_thread_facts (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        thread_id TEXT NOT NULL,
+                        fact TEXT NOT NULL,
+                        confidence REAL DEFAULT 0.5,
+                        hit_count INTEGER DEFAULT 1,
+                        last_seen_at TEXT DEFAULT '',
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    )
+                ''')
+
+                self._ensure_column(cursor, "zalo_messages", "message_id", "TEXT DEFAULT ''")
+                self._ensure_column(cursor, "zalo_messages", "direction", "TEXT DEFAULT 'inbound'")
+                self._ensure_column(cursor, "zalo_messages", "mentions_json", "TEXT DEFAULT '[]'")
+                self._ensure_column(cursor, "zalo_messages", "raw_json", "TEXT DEFAULT '{}'")
+                self._ensure_column(cursor, "zalo_messages", "timestamp", "TEXT DEFAULT ''")
+                self._ensure_column(cursor, "zalo_threads", "last_bootstrap_at", "TEXT DEFAULT ''")
+                self._ensure_column(cursor, "zalo_threads", "bootstrap_done", "BOOLEAN DEFAULT 0")
+                self._ensure_column(cursor, "zalo_thread_summaries", "from_ts", "TEXT DEFAULT ''")
+                self._ensure_column(cursor, "zalo_thread_summaries", "to_ts", "TEXT DEFAULT ''")
+                self._ensure_column(cursor, "zalo_thread_summaries", "message_count", "INTEGER DEFAULT 0")
+                self._ensure_column(cursor, "zalo_thread_facts", "confidence", "REAL DEFAULT 0.5")
+                self._ensure_column(cursor, "zalo_thread_facts", "hit_count", "INTEGER DEFAULT 1")
+                self._ensure_column(cursor, "zalo_thread_facts", "last_seen_at", "TEXT DEFAULT ''")
+
+                cursor.execute('''
+                    CREATE INDEX IF NOT EXISTS idx_zalo_messages_thread_ts
+                    ON zalo_messages (thread_id, timestamp DESC, id DESC)
+                ''')
+                cursor.execute('''
+                    CREATE INDEX IF NOT EXISTS idx_zalo_messages_thread_sender_ts
+                    ON zalo_messages (thread_id, sender_id, timestamp DESC, id DESC)
+                ''')
+                cursor.execute('''
+                    CREATE INDEX IF NOT EXISTS idx_zalo_threads_last_message
+                    ON zalo_threads (last_message_at DESC, updated_at DESC)
+                ''')
+                cursor.execute('''
+                    CREATE INDEX IF NOT EXISTS idx_zalo_thread_summaries_thread_updated
+                    ON zalo_thread_summaries (thread_id, updated_at DESC, id DESC)
+                ''')
+                cursor.execute('''
+                    CREATE UNIQUE INDEX IF NOT EXISTS idx_zalo_messages_thread_message_id
+                    ON zalo_messages (thread_id, message_id)
+                    WHERE message_id IS NOT NULL AND message_id != ''
+                ''')
+                cursor.execute('''
+                    CREATE UNIQUE INDEX IF NOT EXISTS idx_zalo_thread_facts_thread_fact
+                    ON zalo_thread_facts (thread_id, fact)
+                ''')
+
                 conn.commit()
                 logger.info("Database initialized successfully.")
             except Exception as e:

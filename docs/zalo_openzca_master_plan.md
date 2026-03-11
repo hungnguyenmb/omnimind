@@ -423,7 +423,7 @@ Exit criteria:
 ## Phase 4 - Reliability Hardening
 
 Mục tiêu:
-- giảm duplicate, crash, session drift
+- nâng chất lượng hội thoại Zalo theo thread, giảm duplicate, giảm chậm query, giữ context ổn định nhiều ngày mà không làm bot nặng lên
 
 Tính năng:
 - dedupe theo idempotency key
@@ -432,19 +432,63 @@ Tính năng:
 - listener lock theo profile
 - outbound queue + throttle
 - structured runtime logs
+- thread-scoped Zalo memory thay vì chỉ dùng memory global của assistant
+- bootstrap context lần đầu bằng `openzca msg recent <threadId> [-g] -n <N> --json`
+- fallback an toàn nếu `msg recent` lỗi hoặc timeout
+- burst aggregation / debounce theo `thread_id` khi user gửi nhiều tin liên tiếp
+- single-flight per thread để không spawn nhiều request Codex chồng nhau cho cùng một cuộc trò chuyện
+- DB riêng cho Zalo:
+  - `zalo_threads`
+  - `zalo_messages`
+  - `zalo_thread_summaries`
+  - `zalo_thread_facts`
+- index tối thiểu:
+  - `zalo_messages(thread_id, timestamp DESC)`
+  - `zalo_messages(thread_id, message_id)`
+  - `zalo_messages(thread_id, sender_id, timestamp DESC)`
+  - `zalo_threads(last_message_at DESC)`
+  - `zalo_thread_summaries(thread_id, updated_at DESC)`
+- retention policy:
+  - raw messages có ngưỡng `3 ngày`, nhưng chỉ bị xóa khi thread đã có summary usable
+  - thread summaries giữ `30 ngày`
+  - facts/preferences giữ lâu hơn và prune theo confidence/hit_count nếu cần
+- `zalo_threads` là metadata sống lâu, không bị xóa cùng retention raw
+- rolling summary theo thread trước khi xóa raw cũ
+- prompt architecture cho Zalo theo thứ tự:
+  - assistant identity
+  - global working rules
+  - `Nguyên tắc trả lời Zalo`
+  - thread summary
+  - thread facts
+  - recent turns
+  - current bundled messages
+- cleanup job định kỳ cho raw messages và summaries
+- auto cleanup là bắt buộc ở phase này; manual cleanup button để Phase 5
 
 File dự kiến:
 - `[MODIFY] src/engine/zalo_bot_service.py`
 - `[MODIFY] src/engine/zalo_connection_monitor.py`
 - `[MODIFY] src/engine/process_lock.py` nếu cần helper tái sử dụng
+- `[MODIFY] src/database/db_manager.py`
+- `[NEW] src/engine/zalo_memory_manager.py`
+- `[NEW] src/engine/zalo_prompt_builder.py`
+- `[MODIFY] src/engine/config_manager.py`
 
 Manual verification:
 1. Kill listener process, watchdog restart lại.
 2. Feed event trùng, bot không trả lời hai lần.
 3. Mô phỏng reconnect liên tục, log không spam và UI không loạn state.
+4. Gửi 3-5 tin liên tiếp trong cùng một DM, bot gom đúng cụm ý và trả lời một lần hợp lý.
+5. Thread Zalo mới chưa có dữ liệu local, bot bootstrap được lịch sử gần nhất bằng `msg recent` hoặc fallback sạch nếu API lỗi.
+6. Sau khi có lịch sử vài ngày, query context vẫn nhanh nhờ index và chỉ lấy recent turns + summary.
+7. Sau hơn `3 ngày`, raw message cũ chỉ bị dọn khi thread đã có summary usable; summary `30 ngày` vẫn giữ continuity hội thoại.
+8. Prompt runtime luôn chứa block `Nguyên tắc trả lời Zalo` trước phần thread context.
 
 Exit criteria:
 - bot đủ ổn để chạy nền dài hạn
+- bot hiểu context theo từng thread tốt hơn thay vì chỉ dựa trên memory chung
+- query context không phụ thuộc vào full history scan
+- retention `3 ngày raw có điều kiện / 30 ngày summaries` hoạt động tự động và không làm mất continuity chính
 
 ## Phase 5 - UI Polish và Operator Controls
 
@@ -460,9 +504,14 @@ Tính năng:
   - `Re-login`
   - `Start Bot`
   - `Stop Bot`
+  - `Dọn dữ liệu Zalo ngay`
 - hiển thị account metadata cơ bản nếu lấy được
 - editor prompt nguyên tắc Zalo
 - editor group allowlist thân thiện hơn
+- manual cleanup controls cho:
+  - raw cũ
+  - summaries cũ
+  - cleanup all theo retention hiện tại
 
 Manual verification:
 1. Toàn bộ flow từ cài runtime đến bật bot thực hiện được từ UI.
@@ -605,4 +654,3 @@ Nguyên tắc khi code:
   - https://github.com/darkamenosa/openzca/blob/main/README.md
 - `openzca` CLI feature reference:
   - https://github.com/darkamenosa/openzca/blob/main/docs/zca-cli-features-reference.md
-

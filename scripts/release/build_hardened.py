@@ -69,11 +69,10 @@ def _obfuscate_src_pyarmor(work_dir: Path) -> None:
 
 
 def _build_pyinstaller(work_dir: Path, target: str) -> Path:
-    _check_command("pyinstaller")
+    pyinstaller_cmd = [sys.executable, "-m", "PyInstaller"]
 
     if target == "windows":
-        cmd = [
-            "pyinstaller",
+        cmd = pyinstaller_cmd + [
             "--clean",
             "--noconfirm",
             "--name",
@@ -90,8 +89,7 @@ def _build_pyinstaller(work_dir: Path, target: str) -> Path:
             "src/main.py",
         ]
     elif target == "macos":
-        cmd = [
-            "pyinstaller",
+        cmd = pyinstaller_cmd + [
             "--clean",
             "--noconfirm",
             str(work_dir / "OmniMind.spec"),

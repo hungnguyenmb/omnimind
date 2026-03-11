@@ -1,3 +1,4 @@
+import json
 import logging
 import os
 import platform
@@ -17,6 +18,7 @@ class OpenZcaManager:
     DEFAULT_PROFILE_NAME = "omnimind"
     INSTALL_TIMEOUT_SEC = 20 * 60
     AUTH_TIMEOUT_SEC = 5 * 60
+    LISTEN_START_TIMEOUT_SEC = 30
 
     def __init__(self, env_manager: Optional[EnvironmentManager] = None):
         self.env_manager = env_manager or EnvironmentManager()
@@ -234,7 +236,18 @@ class OpenZcaManager:
         lines = [line.strip() for line in str(raw or "").splitlines() if line.strip()]
         if not lines:
             return ""
-        return lines[0][:220]
+        for line in lines:
+            low = line.lower()
+            if low.startswith("displayname:"):
+                return line.split(":", 1)[1].strip().strip(",").strip("'").strip('"')[:220]
+            if low.startswith("error:") or "not logged in" in low or "login required" in low:
+                return line[:220]
+        if lines[0] == "{":
+            for line in lines[1:]:
+                cleaned = line.strip().strip(",")
+                if cleaned and cleaned not in {"{", "}"}:
+                    return cleaned[:220]
+        return lines[0].strip().strip(",")[:220]
 
     def _persist_runtime_status(self, install_status: str, version: str = "", last_error: str = ""):
         ConfigManager.set_zalo_runtime_status(
@@ -406,6 +419,7 @@ class OpenZcaManager:
         text = str(raw_text or "").strip().lower()
         if not text:
             return False
+        compact = text.replace(" ", "")
         negative = (
             "not logged in",
             "not authenticated",
@@ -414,8 +428,11 @@ class OpenZcaManager:
             "no session",
             "login required",
             "qr required",
+            "loggedin:false",
+            "'loggedin':false",
+            "\"loggedin\":false",
         )
-        if any(token in text for token in negative):
+        if any(token in compact for token in negative) or any(token in text for token in negative):
             return False
         positive = (
             "logged in",
@@ -425,8 +442,11 @@ class OpenZcaManager:
             "session active",
             "active session",
             "đã đăng nhập",
+            "loggedin:true",
+            "'loggedin':true",
+            "\"loggedin\":true",
         )
-        return any(token in text for token in positive)
+        return any(token in compact for token in positive) or any(token in text for token in positive)
 
     @staticmethod
     def _extract_identity(raw_text: str) -> str:
@@ -479,7 +499,7 @@ class OpenZcaManager:
             self_user_id = self._extract_identity(self._extract_text(id_res))
 
         if logged_in:
-            msg = combined or "Zalo session đang hoạt động."
+            msg = self._extract_auth_display_name(combined) or combined or "Zalo session đang hoạt động."
             return {
                 "success": True,
                 "logged_in": True,
@@ -556,4 +576,180 @@ class OpenZcaManager:
         return {
             "success": False,
             "message": self._summarize_output(combined) or result.get("message") or "Đăng xuất Zalo thất bại.",
+        }
+
+    @staticmethod
+    def _extract_auth_display_name(raw_text: str) -> str:
+        for line in str(raw_text or "").splitlines():
+            text = str(line or "").strip()
+            if text.lower().startswith("displayname:"):
+                return text.split(":", 1)[1].strip().strip(",").strip("'").strip('"')
+        return ""
+
+    def build_listen_command(self) -> list[str]:
+        return self._build_openzca_invocation(
+            "listen",
+            "--supervised",
+            "--raw",
+            "--keep-alive",
+            "--profile",
+            self.get_profile_name(),
+        )
+
+    @staticmethod
+    def _strip_quotes(value: str) -> str:
+        return str(value or "").strip().strip("'").strip('"')
+
+    def list_groups(self) -> dict:
+        runtime = self.inspect_runtime()
+        if not runtime.get("openzca_ready"):
+            return {"success": False, "groups": [], "message": runtime.get("message", "Zalo chưa sẵn sàng.")}
+        status = self.run_auth_status()
+        if not status.get("logged_in"):
+            return {"success": False, "groups": [], "message": status.get("message", "Chưa đăng nhập Zalo.")}
+
+        res = self._run_openzca_command(["group", "list"], timeout=30)
+        text = self._extract_text(res)
+        groups = self._parse_group_list_table(text)
+        if res.get("success"):
+            return {"success": True, "groups": groups, "message": f"Tải {len(groups)} nhóm thành công."}
+        return {"success": False, "groups": groups, "message": self._summarize_output(text) or "Không thể tải danh sách nhóm."}
+
+    def get_recent_messages(self, thread_id: str, is_group: bool = False, count: int = 12, timeout_sec: int = 6) -> dict:
+        tid = str(thread_id or "").strip()
+        if not tid:
+            return {"success": False, "messages": [], "message": "Thiếu thread id."}
+        runtime = self.inspect_runtime()
+        if not runtime.get("openzca_ready"):
+            return {"success": False, "messages": [], "message": runtime.get("message", "Zalo chưa sẵn sàng.")}
+        status = self.run_auth_status()
+        if not status.get("logged_in"):
+            return {"success": False, "messages": [], "message": status.get("message", "Chưa đăng nhập Zalo.")}
+
+        safe_count = max(3, min(50, int(count or 12)))
+        args = ["msg", "recent", tid, "-n", str(safe_count), "--json"]
+        if is_group:
+            args.append("--group")
+        res = self._run_openzca_command(args, timeout=max(3, min(20, int(timeout_sec or 6))))
+        text = self._extract_text(res)
+        payload = self._extract_json_payload(text)
+        messages = self._normalize_recent_messages_payload(payload)
+        if res.get("success") and isinstance(payload, (list, dict)):
+            return {
+                "success": True,
+                "messages": messages,
+                "message": f"Tải {len(messages)} tin nhắn gần nhất thành công.",
+                "raw_text": text,
+            }
+        return {
+            "success": False,
+            "messages": messages,
+            "message": self._summarize_output(text) or "Không thể tải lịch sử gần nhất của thread.",
+            "raw_text": text,
+        }
+
+    def get_group_info(self, group_id: str) -> dict:
+        gid = str(group_id or "").strip()
+        if not gid:
+            return {"success": False, "message": "Thiếu group id."}
+        res = self._run_openzca_command(["group", "info", gid], timeout=30)
+        text = self._extract_text(res)
+        return {
+            "success": bool(res.get("success")),
+            "message": self._summarize_output(text) or ("OK" if res.get("success") else "Không thể lấy thông tin nhóm."),
+            "raw_text": text,
+        }
+
+    @staticmethod
+    def _parse_group_list_table(raw_text: str) -> list[dict]:
+        rows: list[dict] = []
+        for line in str(raw_text or "").splitlines():
+            text = str(line or "").strip()
+            if not text.startswith("│"):
+                continue
+            if "(index)" in text or "groupId" in text:
+                continue
+            if text.startswith("├") or text.startswith("└") or text.startswith("┌"):
+                continue
+            parts = [part.strip() for part in text.strip("│").split("│")]
+            if len(parts) < 5:
+                continue
+            group_id = OpenZcaManager._strip_quotes(parts[1])
+            name = OpenZcaManager._strip_quotes(parts[2])
+            total_member = OpenZcaManager._strip_quotes(parts[3])
+            if not group_id:
+                continue
+            rows.append(
+                {
+                    "thread_id": group_id,
+                    "name": name or group_id,
+                    "total_member": total_member,
+                }
+            )
+        return rows
+
+    @staticmethod
+    def _extract_json_payload(raw_text: str):
+        body = str(raw_text or "").strip()
+        if not body:
+            return None
+        try:
+            return json.loads(body)
+        except Exception:
+            pass
+        starts = [body.find("["), body.find("{")]
+        starts = [idx for idx in starts if idx >= 0]
+        if not starts:
+            return None
+        start = min(starts)
+        for end in range(len(body), start, -1):
+            chunk = body[start:end].strip()
+            if not chunk:
+                continue
+            try:
+                return json.loads(chunk)
+            except Exception:
+                continue
+        return None
+
+    @staticmethod
+    def _normalize_recent_messages_payload(payload) -> list[dict]:
+        if isinstance(payload, list):
+            return [item for item in payload if isinstance(item, dict)]
+        if isinstance(payload, dict):
+            for key in ("messages", "items", "data", "results"):
+                value = payload.get(key)
+                if isinstance(value, list):
+                    return [item for item in value if isinstance(item, dict)]
+        return []
+
+    def send_text_message(self, thread_id: str, text: str, is_group: bool = False) -> dict:
+        tid = str(thread_id or "").strip()
+        body = str(text or "").strip()
+        if not tid or not body:
+            return {"success": False, "message": "Thiếu thread hoặc nội dung tin nhắn."}
+        args = ["msg", "send", tid, body]
+        if is_group:
+            args.append("--group")
+        res = self._run_openzca_command(args, timeout=45)
+        combined = self._extract_text(res)
+        return {
+            "success": bool(res.get("success")),
+            "message": self._summarize_output(combined) or ("Đã gửi tin nhắn." if res.get("success") else "Không thể gửi tin nhắn."),
+            "raw_text": combined,
+        }
+
+    def send_typing(self, thread_id: str, is_group: bool = False) -> dict:
+        tid = str(thread_id or "").strip()
+        if not tid:
+            return {"success": False, "message": "Thiếu thread id."}
+        args = ["msg", "typing", tid]
+        if is_group:
+            args.append("--group")
+        res = self._run_openzca_command(args, timeout=20)
+        combined = self._extract_text(res)
+        return {
+            "success": bool(res.get("success")),
+            "message": self._summarize_output(combined) or ("Đã gửi typing." if res.get("success") else "Không thể gửi typing."),
+            "raw_text": combined,
         }

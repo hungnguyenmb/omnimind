@@ -1,5 +1,6 @@
 import logging
 import os
+import json
 from datetime import datetime, timezone
 from pathlib import Path
 from database.db_manager import db
@@ -341,3 +342,168 @@ class ConfigManager:
             "qr_path": cls.get("zalo_qr_path", "").strip(),
             "qr_requested_at": cls.get("zalo_qr_requested_at", "").strip(),
         }
+
+    @classmethod
+    def get_zalo_bot_config(cls) -> dict:
+        scope = cls.get("zalo_group_scope", "all").strip().lower()
+        if scope not in {"all", "selected"}:
+            scope = "all"
+        reply_mode = cls.get("zalo_reply_mode", "dm_and_mention").strip().lower()
+        if reply_mode not in {"dm_and_mention"}:
+            reply_mode = "dm_and_mention"
+        enabled = cls.get("zalo_enabled", "False").strip().lower() == "true"
+        auto_reply = cls.get("zalo_auto_reply", "True").strip().lower() == "true"
+        model = cls.get("zalo_model", "").strip() or "gpt-5-codex-mini"
+        return {
+            "enabled": enabled,
+            "auto_reply": auto_reply,
+            "group_scope": scope,
+            "group_allowlist": cls.get_zalo_group_allowlist(),
+            "prompt_principles": cls.get("zalo_prompt_principles", "").strip(),
+            "reply_mode": reply_mode,
+            "model": model,
+        }
+
+    @classmethod
+    def get_zalo_raw_retention_days(cls) -> int:
+        try:
+            value = int(str(cls.get("zalo_raw_retention_days", "3") or "3").strip())
+        except Exception:
+            value = 3
+        return max(1, min(30, value))
+
+    @classmethod
+    def get_zalo_summary_retention_days(cls) -> int:
+        try:
+            value = int(str(cls.get("zalo_summary_retention_days", "30") or "30").strip())
+        except Exception:
+            value = 30
+        return max(7, min(365, value))
+
+    @classmethod
+    def get_zalo_delete_raw_only_when_summarized(cls) -> bool:
+        return cls.get("zalo_delete_raw_only_when_summarized", "True").strip().lower() != "false"
+
+    @classmethod
+    def get_zalo_thread_debounce_ms(cls) -> int:
+        try:
+            value = int(str(cls.get("zalo_thread_debounce_ms", "1200") or "1200").strip())
+        except Exception:
+            value = 1200
+        return max(500, min(10000, value))
+
+    @classmethod
+    def get_zalo_recent_bootstrap_count(cls) -> int:
+        try:
+            value = int(str(cls.get("zalo_recent_bootstrap_count", "8") or "8").strip())
+        except Exception:
+            value = 8
+        return max(3, min(50, value))
+
+    @classmethod
+    def set_zalo_bot_config(
+        cls,
+        enabled: bool | None = None,
+        auto_reply: bool | None = None,
+        group_scope: str | None = None,
+        group_allowlist: list | None = None,
+        prompt_principles: str | None = None,
+        reply_mode: str | None = None,
+        model: str | None = None,
+    ):
+        if enabled is not None:
+            cls.set("zalo_enabled", "True" if enabled else "False")
+        if auto_reply is not None:
+            cls.set("zalo_auto_reply", "True" if auto_reply else "False")
+        if group_scope is not None:
+            scope = str(group_scope or "").strip().lower()
+            if scope not in {"all", "selected"}:
+                scope = "all"
+            cls.set("zalo_group_scope", scope)
+        if group_allowlist is not None:
+            cls.set_zalo_group_allowlist(group_allowlist)
+        if prompt_principles is not None:
+            cls.set("zalo_prompt_principles", str(prompt_principles or "").strip())
+        if reply_mode is not None:
+            mode = str(reply_mode or "").strip().lower()
+            if mode not in {"dm_and_mention"}:
+                mode = "dm_and_mention"
+            cls.set("zalo_reply_mode", mode)
+        if model is not None:
+            cls.set("zalo_model", str(model or "").strip() or "gpt-5-codex-mini")
+
+    @classmethod
+    def get_zalo_group_allowlist(cls) -> list[str]:
+        raw = cls.get("zalo_group_allowlist", "").strip()
+        if not raw:
+            return []
+        try:
+            parsed = json.loads(raw)
+        except Exception:
+            return []
+        if not isinstance(parsed, list):
+            return []
+        out: list[str] = []
+        seen = set()
+        for item in parsed:
+            value = str(item or "").strip()
+            if not value or value in seen:
+                continue
+            seen.add(value)
+            out.append(value)
+        return out
+
+    @classmethod
+    def set_zalo_group_allowlist(cls, group_ids: list):
+        cleaned: list[str] = []
+        seen = set()
+        for item in group_ids or []:
+            value = str(item or "").strip()
+            if not value or value in seen:
+                continue
+            seen.add(value)
+            cleaned.append(value)
+        cls.set("zalo_group_allowlist", json.dumps(cleaned, ensure_ascii=False))
+
+    @classmethod
+    def get_zalo_listener_status(cls) -> dict:
+        state = cls.get("zalo_listener_state", "stopped").strip().lower()
+        if state not in {"stopped", "starting", "running", "restarting", "crashed"}:
+            state = "stopped"
+        try:
+            restart_count = int(cls.get("zalo_listener_restart_count", "0") or 0)
+        except Exception:
+            restart_count = 0
+        return {
+            "state": state,
+            "last_error": cls.get("zalo_listener_last_error", "").strip(),
+            "last_started_at": cls.get("zalo_listener_last_started_at", "").strip(),
+            "last_stopped_at": cls.get("zalo_listener_last_stopped_at", "").strip(),
+            "restart_count": max(0, restart_count),
+        }
+
+    @classmethod
+    def set_zalo_listener_status(
+        cls,
+        state: str,
+        last_error: str | None = None,
+        last_started_at: str | None = None,
+        last_stopped_at: str | None = None,
+        restart_count: int | None = None,
+    ):
+        normalized = str(state or "").strip().lower()
+        if normalized not in {"stopped", "starting", "running", "restarting", "crashed"}:
+            normalized = "stopped"
+        cls.set("zalo_listener_state", normalized)
+        if last_error is not None:
+            cls.set("zalo_listener_last_error", str(last_error or "").strip())
+        if last_started_at is not None:
+            cls.set("zalo_listener_last_started_at", str(last_started_at or "").strip())
+        if last_stopped_at is not None:
+            cls.set("zalo_listener_last_stopped_at", str(last_stopped_at or "").strip())
+        if restart_count is not None:
+            try:
+                value = max(0, int(restart_count))
+            except Exception:
+                value = 0
+            cls.set("zalo_listener_restart_count", str(value))
