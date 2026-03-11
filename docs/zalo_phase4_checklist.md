@@ -4,6 +4,11 @@ Ngày tạo: `2026-03-11`
 
 Tài liệu này dùng để triển khai và theo dõi tiến độ `Phase 4 - Reliability Hardening + Thread Memory` cho tích hợp Zalo trong `projects/omnimind`.
 
+Trạng thái cập nhật:
+- `Phase 4` hiện được xem là mốc hoàn tất cho Zalo text MVP ở nhánh hiện tại.
+- Phase tiếp theo dự kiến là `Media Support`.
+- Phase observability/operator tools được dời thành backlog tùy chọn, chưa ưu tiên ngay.
+
 Tham chiếu gốc:
 - [zalo_openzca_master_plan.md](/Users/admin/hungnm/work/freelancer/project/antigravity-workspace/projects/omnimind/docs/zalo_openzca_master_plan.md)
 - [zalo_phase3_checklist.md](/Users/admin/hungnm/work/freelancer/project/antigravity-workspace/projects/omnimind/docs/zalo_phase3_checklist.md)
@@ -44,6 +49,11 @@ Chỉ được xem là hoàn tất Phase 4 khi thỏa cả các điều kiện:
   - thread facts
   - recent turns
   - current bundled messages
+
+Chốt trạng thái hiện tại:
+- Phase 4 đã đạt mức usable cho text bot MVP.
+- Các lỗi runtime chính của text flow đã được vá trong quá trình test thực chiến.
+- Hướng tiếp theo không phải debug tooling mà là media.
 
 ## 1) Chốt phạm vi
 

@@ -490,10 +490,45 @@ Exit criteria:
 - query context không phụ thuộc vào full history scan
 - retention `3 ngày raw có điều kiện / 30 ngày summaries` hoạt động tự động và không làm mất continuity chính
 
-## Phase 5 - UI Polish và Operator Controls
+## Phase 5 - Media Support
 
 Mục tiêu:
-- vận hành được bởi user cuối, không cần terminal
+- mở rộng Zalo bot từ text-only sang xử lý media theo cách không phá vỡ kiến trúc Phase 4
+
+Tính năng:
+- nhận metadata media inbound từ Zalo:
+  - ảnh
+  - file
+  - media có caption
+- map media vào schema nội bộ Zalo:
+  - `media_type`
+  - `media_path`
+  - `media_urls`
+  - `mime_type`
+  - `caption`
+- gộp text + caption + media vào cùng một bundle theo thread
+- cho runtime bridge biết có media đi kèm để build prompt đúng ngữ cảnh
+- ưu tiên inbound media trước outbound media
+- nếu `openzca` hỗ trợ ổn định:
+  - gửi ảnh/file outbound
+  - fallback an toàn nếu không gửi được media
+- giữ nguyên rule hiện tại:
+  - DM auto reply
+  - group chỉ reply khi `@mention`
+
+Manual verification:
+1. DM gửi ảnh có caption, bot hiểu được caption và metadata media.
+2. Group gửi ảnh/file kèm `@mention`, bot xử lý đúng ngữ cảnh.
+3. Media inbound không làm vỡ flow text-only hiện tại.
+4. Nếu outbound media lỗi, bot fallback hoặc log rõ thay vì treo luồng.
+
+Exit criteria:
+- OmniMind xử lý được inbound media cơ bản trên Zalo mà không làm giảm độ ổn định của text flow
+
+## Phase 6 - UI Polish và Operator Controls (Optional / Deferred)
+
+Mục tiêu:
+- bổ sung công cụ vận hành khi thực sự cần, không phải ưu tiên hiện tại
 
 Tính năng:
 - card trạng thái Zalo riêng trên Dashboard
@@ -520,7 +555,7 @@ Manual verification:
 Exit criteria:
 - feature đủ mức production beta cho người dùng nội bộ
 
-## Phase 6 - Future Expansion
+## Phase 7 - Future Expansion
 
 Mục tiêu:
 - mở rộng mà không phá vỡ kiến trúc MVP
@@ -545,10 +580,12 @@ Nguyên tắc mở rộng:
 4. Phase 4
 5. Phase 5
 6. Phase 6
+7. Phase 7
 
 Lý do:
 - phải cài runtime và xác định auth state ổn định trước khi nói đến bot logic
 - bot MVP nên ra sớm nhưng reliability không được bỏ qua quá lâu
+- sau khi text flow ổn định, phase tiếp theo ưu tiên media hơn là debug tooling
 
 ## 11) Rủi ro chính và cách chặn
 

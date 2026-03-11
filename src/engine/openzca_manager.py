@@ -728,9 +728,11 @@ class OpenZcaManager:
         body = str(text or "").strip()
         if not tid or not body:
             return {"success": False, "message": "Thiếu thread hoặc nội dung tin nhắn."}
-        args = ["msg", "send", tid, body]
+        # `--` prevents Commander from treating a message starting with `-` as a CLI flag.
+        args = ["msg", "send"]
         if is_group:
             args.append("--group")
+        args.extend(["--", tid, body])
         res = self._run_openzca_command(args, timeout=45)
         combined = self._extract_text(res)
         return {
