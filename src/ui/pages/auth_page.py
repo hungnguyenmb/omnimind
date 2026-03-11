@@ -1039,6 +1039,31 @@ class AuthPage(QWidget):
         )
         return any(worker and worker.isRunning() for worker in workers)
 
+    def _reset_zalo_bot_button_texts(self):
+        self.zalo_start_bot_btn.setText("  Bật bot Zalo")
+        self.zalo_restart_bot_btn.setText("  Khởi động lại bot")
+        self.zalo_stop_bot_btn.setText("  Tắt bot Zalo")
+
+    def _apply_pending_zalo_bot_button_state(self):
+        op = str(self._pending_zalo_bot_op or "").strip().lower()
+        if not op:
+            return
+        if op == "start":
+            self.zalo_start_bot_btn.setText("  Đang khởi động bot...")
+            self.zalo_start_bot_btn.setVisible(True)
+            self.zalo_restart_bot_btn.setVisible(False)
+            self.zalo_stop_bot_btn.setVisible(False)
+        elif op == "restart":
+            self.zalo_restart_bot_btn.setText("  Đang khởi động lại...")
+            self.zalo_start_bot_btn.setVisible(False)
+            self.zalo_restart_bot_btn.setVisible(True)
+            self.zalo_stop_bot_btn.setVisible(False)
+        elif op == "stop":
+            self.zalo_stop_bot_btn.setText("  Đang tắt bot...")
+            self.zalo_start_bot_btn.setVisible(False)
+            self.zalo_restart_bot_btn.setVisible(False)
+            self.zalo_stop_bot_btn.setVisible(True)
+
     def _sync_zalo_button_states(self):
         status = self.zalo_monitor.get_status() if self.zalo_monitor else ConfigManager.get_zalo_connection_status()
         bot_status = get_global_zalo_bot_service().get_status()
@@ -1048,6 +1073,7 @@ class AuthPage(QWidget):
         listener_state = str(bot_status.get("state") or "stopped")
         listener_running = bool(bot_status.get("running"))
         connected = state == "connected"
+        self._reset_zalo_bot_button_texts()
 
         self.zalo_check_btn.setEnabled(not busy)
         self.zalo_install_btn.setEnabled(not busy)
@@ -1074,6 +1100,8 @@ class AuthPage(QWidget):
         self.zalo_start_bot_btn.setVisible(listener_state in {"stopped", "crashed"})
         self.zalo_restart_bot_btn.setVisible(listener_running)
         self.zalo_stop_bot_btn.setVisible(listener_running)
+        if self._zalo_bot_worker and self._zalo_bot_worker.isRunning():
+            self._apply_pending_zalo_bot_button_state()
         self._sync_zalo_group_scope_ui()
 
     def _sync_zalo_group_scope_ui(self):
@@ -1135,6 +1163,7 @@ class AuthPage(QWidget):
         self.zalo_bot_status_label.setText(label)
         self.zalo_bot_status_label.setStyleSheet(f"font-size: 14px; font-weight: 600; color: {color};")
         self.zalo_bot_hint.setText(hint)
+        self._apply_pending_zalo_bot_button_state()
         self._zalo_bot_worker = ZaloBotWorker(self._pending_zalo_bot_op, self)
         self._zalo_bot_worker.finished.connect(self._on_zalo_bot_worker_finished)
         self._zalo_bot_worker.start()
@@ -1428,6 +1457,7 @@ class AuthPage(QWidget):
 
     def _on_zalo_bot_worker_finished(self, result: dict):
         self._zalo_bot_worker = None
+        self._pending_zalo_bot_op = ""
         if not result.get("success") and result.get("message"):
             msg = self._sanitize_zalo_message(
                 result.get("message"),

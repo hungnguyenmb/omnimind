@@ -1,6 +1,24 @@
 from __future__ import annotations
 
+import re
+
 class ZaloPromptBuilder:
+    HEADER_ONLY_RE = re.compile(
+        r"^\s*(trả lời|tra loi|response|reply|trợ lý(?:\s+\w+){0,3}|tro ly(?:\s+\w+){0,3})\s*$",
+        re.IGNORECASE,
+    )
+
+    @classmethod
+    def _clean_model_line(cls, line: str) -> str:
+        body = str(line or "").replace("**", "").replace("__", "").strip()
+        body = body.replace("OmniMind:", "Mình:")
+        body = re.sub(r"^\s*[-–—]+\s+", "", body)
+        body = re.sub(r"^\s*\d+[.)]\s+", "", body)
+        compact = re.sub(r"[^0-9A-Za-zÀ-ỹ]+", " ", body, flags=re.UNICODE).strip().lower()
+        if compact and cls.HEADER_ONLY_RE.match(compact):
+            return ""
+        return body.strip()
+
     @staticmethod
     def _shorten(text: str, limit: int = 220) -> str:
         body = " ".join(str(text or "").split())
@@ -12,14 +30,11 @@ class ZaloPromptBuilder:
     def _clean_summary_text(text: str, limit: int = 1400) -> str:
         rows = []
         for raw_line in str(text or "").splitlines():
-            line = str(raw_line or "").strip()
+            line = ZaloPromptBuilder._clean_model_line(str(raw_line or "").strip())
             if not line:
                 continue
             if line.startswith("- Người dùng: {") and line.endswith("}"):
                 continue
-            line = line.replace("- OmniMind:", "- Mình:")
-            line = line.replace("OmniMind:", "Mình:")
-            line = line.replace("**Trợ lý**", "").strip()
             if line:
                 rows.append(line)
         cleaned = "\n".join(rows).strip()
@@ -27,10 +42,9 @@ class ZaloPromptBuilder:
 
     @staticmethod
     def _clean_turn_text(text: str) -> str:
-        body = str(text or "").strip()
+        body = ZaloPromptBuilder._clean_model_line(str(text or "").strip())
         if not body:
             return ""
-        body = body.replace("**Trợ lý**", "").replace("OmniMind:", "Mình:")
         body = " ".join(body.split()).strip()
         return body
 
@@ -89,7 +103,7 @@ class ZaloPromptBuilder:
         if fact_rows:
             prompt_parts.append(f"Các fact/preferences đã biết của thread:\n{chr(10).join(fact_rows)}")
         if turn_rows:
-            prompt_parts.append(f"Recent conversation turns:\n{chr(10).join(turn_rows)}")
+            prompt_parts.append(f"Lịch sử hội thoại gần đây của thread theo thứ tự thời gian:\n{chr(10).join(turn_rows)}")
 
         meta_rows = [
             f"Thread ID: {thread_id}",
@@ -110,6 +124,8 @@ class ZaloPromptBuilder:
             "Yêu cầu trả lời:\n"
             "- Ưu tiên tiếng Việt tự nhiên, rõ ràng.\n"
             "- Nếu người dùng vừa gửi nhiều tin liên tiếp, hãy trả lời gộp theo đúng mạch ý.\n"
+            "- Không mở đầu bằng tiêu đề kiểu 'Trả lời', 'Trợ lý...', không dùng markdown đậm, không tự đặt heading.\n"
+            "- Trả lời như một người đang nhắn Zalo thật: gọn, mạch lạc, tối đa 1-2 đoạn ngắn hoặc vài câu liền nhau.\n"
             "- Không nhắc đến database, summary, retention hay cơ chế nội bộ.\n"
             "- Nếu chưa đủ chắc chắn, hỏi lại ngắn gọn thay vì đoán."
         )

@@ -3,6 +3,7 @@ from __future__ import annotations
 import ast
 import json
 import logging
+import re
 import subprocess
 import threading
 import time
@@ -31,6 +32,7 @@ class ZaloBotService:
     TYPING_INTERVAL_SEC = 4.0
     DISPATCH_POLL_SEC = 0.25
     CLEANUP_INTERVAL_SEC = 30 * 60
+    OUTBOUND_HEADER_RE = re.compile(r"^(trả lời|tra loi|response|reply|trợ lý(?:\s+\w+){0,3}|tro ly(?:\s+\w+){0,3})$", re.IGNORECASE)
 
     def __init__(self):
         self._lock = threading.RLock()
@@ -445,10 +447,10 @@ class ZaloBotService:
             zalo_cfg = ConfigManager.get_zalo_bot_config()
             thread_context = self._zalo_memory.build_thread_context(
                 thread_id=base_event.thread_id,
-                message_limit=8,
+                message_limit=32,
                 facts_limit=6,
                 summary_limit=2,
-                char_budget=5000,
+                char_budget=12000,
             )
             prompt, context_meta = self._prompt_builder.build_prompt(
                 thread_context=thread_context,
@@ -463,7 +465,7 @@ class ZaloBotService:
                 timeout_sec=600,
                 model_override=str(zalo_cfg.get("model") or "").strip(),
             )
-            final_text = self._extract_final_text(result) or "Mình chưa có nội dung phù hợp để gửi."
+            final_text = self._sanitize_outbound_text(self._extract_final_text(result)) or "Mình chưa có nội dung phù hợp để gửi."
             self._stop_typing_loop(typing_stop, typing_thread)
             typing_stop = None
             typing_thread = None
@@ -599,6 +601,49 @@ class ZaloBotService:
             if left and left == right:
                 body = left
         return body
+
+    @classmethod
+    def _sanitize_outbound_text(cls, text: str) -> str:
+        body = str(text or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+        if not body:
+            return ""
+        body = body.replace("**", "").replace("__", "")
+        cleaned_lines: list[str] = []
+        for idx, raw_line in enumerate(body.splitlines()):
+            line = str(raw_line or "").strip()
+            if not line:
+                if cleaned_lines and cleaned_lines[-1] != "":
+                    cleaned_lines.append("")
+                continue
+            line = re.sub(r"^\s*[>#]+\s*", "", line)
+            line = re.sub(r"^\s*\*+\s*", "", line)
+            line = re.sub(r"^\s*\d+[.)]\s+", "", line)
+            line = re.sub(r"^\s*[-–—]+\s+", "", line)
+            line = re.sub(r"\s{2,}", " ", line).strip()
+            compact = re.sub(r"[^0-9A-Za-zÀ-ỹ]+", " ", line, flags=re.UNICODE).strip().lower()
+            if idx == 0 and compact and cls.OUTBOUND_HEADER_RE.match(compact):
+                continue
+            if line:
+                cleaned_lines.append(line)
+        while cleaned_lines and cleaned_lines[0] == "":
+            cleaned_lines.pop(0)
+        while cleaned_lines and cleaned_lines[-1] == "":
+            cleaned_lines.pop()
+        if not cleaned_lines:
+            return ""
+        if len(cleaned_lines) <= 2:
+            return " ".join(part for part in cleaned_lines if part).strip()
+        rows: list[str] = []
+        previous_blank = False
+        for line in cleaned_lines:
+            if not line:
+                if rows and not previous_blank:
+                    rows.append("")
+                previous_blank = True
+                continue
+            rows.append(line)
+            previous_blank = False
+        return "\n".join(rows).strip()
 
     def _build_bundle_text(self, events: list[ZaloInboundEvent]) -> str:
         if not events:

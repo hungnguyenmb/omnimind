@@ -25,6 +25,7 @@ class ZaloMemoryManager:
         re.compile(r"^\s*(my preference|always|never|prefer)\b.+", re.IGNORECASE),
     ]
     BOT_PREFIX_RE = re.compile(r"^\s*\*{0,2}\s*(trợ lý|tro ly|omnimind)\s*\*{0,2}\s*[:\-]?\s*", re.IGNORECASE)
+    BOT_HEADER_RE = re.compile(r"^\s*\*{0,2}\s*(trả lời|tra loi|response|reply|trợ lý(?:\s+\w+){0,3}|tro ly(?:\s+\w+){0,3})\s*\*{0,2}\s*$", re.IGNORECASE)
 
     @staticmethod
     def _utc_now() -> datetime:
@@ -74,6 +75,19 @@ class ZaloMemoryManager:
                 pass
         if str(direction or "").strip().lower() == "outbound":
             body = cls.BOT_PREFIX_RE.sub("", body, count=1)
+            rows = []
+            for idx, raw_line in enumerate(body.splitlines()):
+                line = str(raw_line or "").strip()
+                if not line:
+                    continue
+                line = line.replace("**", "").replace("__", "")
+                if idx == 0 and cls.BOT_HEADER_RE.match(line):
+                    continue
+                line = re.sub(r"^\s*[-–—]+\s+", "", line)
+                line = re.sub(r"^\s*\d+[.)]\s+", "", line)
+                if line:
+                    rows.append(line)
+            body = "\n".join(rows).strip()
         body = re.sub(r"\n{3,}", "\n\n", body).strip()
         return body
 
@@ -405,7 +419,7 @@ class ZaloMemoryManager:
     ) -> dict:
         tid = str(thread_id or "").strip()
         budget = max(1500, int(char_budget or self.DEFAULT_CONTEXT_CHAR_BUDGET))
-        take_messages = max(4, min(80, int(message_limit or 8) * 2))
+        take_messages = max(30, min(240, int(message_limit or 8) * 6))
         take_facts = max(1, min(20, int(facts_limit or self.DEFAULT_FACT_LIMIT)))
         take_summaries = max(1, min(6, int(summary_limit or self.DEFAULT_SUMMARY_LIMIT)))
 
@@ -414,7 +428,7 @@ class ZaloMemoryManager:
         summaries = self.get_recent_summaries(tid, limit=take_summaries)
         latest_summary = summaries[-1] if summaries else self.get_latest_summary(tid)
         messages = self.get_recent_messages(tid, limit=take_messages)
-        turns = self._build_turns(messages, max_turns=max(3, min(20, int(message_limit or 8))))
+        turns = self._build_turns(messages, max_turns=max(12, min(120, int(message_limit or 8) * 3)))
 
         spent = 0
         compact_summaries: list[dict] = []
