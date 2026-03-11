@@ -86,6 +86,7 @@ class PermissionManager:
                 "permission": permission,
                 "platform": "Windows",
                 "open_mode": mode,
+                "prompted": False,
             }
 
         return {
@@ -229,7 +230,10 @@ class PermissionManager:
             if permission == "camera":
                 from AVFoundation import AVMediaTypeVideo, AVCaptureDevice
 
-                AVCaptureDevice.requestAccessForMediaType_completionHandler_(AVMediaTypeVideo, None)
+                AVCaptureDevice.requestAccessForMediaType_completionHandler_(
+                    AVMediaTypeVideo,
+                    lambda granted: None,
+                )
                 return True
         except Exception as e:
             logger.info(f"Native permission prompt unavailable ({permission}): {e}")

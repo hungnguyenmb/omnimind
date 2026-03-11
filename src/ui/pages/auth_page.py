@@ -1319,6 +1319,7 @@ class AuthPage(QWidget):
             else {"success": False, "open_mode": "failed"}
         )
         open_mode = req_result.get("open_mode", "failed")
+        prompted = bool(req_result.get("prompted", False))
 
         if sys_name == "Darwin":  # macOS
             if open_mode == "anchor":
@@ -1329,6 +1330,11 @@ class AuthPage(QWidget):
                         "Đã mở màn hình quyền hệ thống.\n"
                         f"Hãy bật quyền cho \"{app_display_name}\" rồi quay lại ứng dụng.\n\n"
                         f"{identity_note}"
+                        + (
+                            "\n\nLưu ý: macOS chỉ hiển thị app trong danh sách sau khi app đã gọi prompt native thành công."
+                            if not prompted
+                            else ""
+                        )
                     ),
                 )
             elif open_mode == "settings":
@@ -1339,6 +1345,11 @@ class AuthPage(QWidget):
                         "Đã mở System Settings, nhưng không nhảy đúng trang quyền tự động.\n"
                         "Vui lòng tự vào đúng mục quyền tương ứng để bật cho ứng dụng.\n\n"
                         f"{identity_note}"
+                        + (
+                            "\n\nNếu chưa thấy tên app, hãy dùng bản build mới và nhấn yêu cầu quyền lại."
+                            if not prompted
+                            else ""
+                        )
                     ),
                 )
             else:
@@ -1357,8 +1368,9 @@ class AuthPage(QWidget):
                     self,
                     "Mở màn hình cấp quyền",
                     (
-                        "Đã mở phần Settings tương ứng. Hãy cấp quyền rồi quay lại ứng dụng.\n"
-                        "Sau khi cấp quyền, nên khởi động lại ứng dụng."
+                        "Đã mở phần Settings tương ứng.\n"
+                        "Trên Windows, ứng dụng desktop thường không hiện danh sách theo từng app như macOS.\n"
+                        "Bạn cần bật quyền camera/microphone cho Desktop Apps (nếu có), rồi mở lại OmniMind."
                     ),
                 )
             else:

@@ -376,7 +376,7 @@ class SkillManager:
 
         return ""
 
-    def fetch_marketplace_skills(self, page: int = 1, per_page: int = 200) -> dict:
+    def fetch_marketplace_skills(self, page: int = 1, per_page: int = 50) -> dict:
         """
         Lấy skills từ server và cache vào SQLite.
         """

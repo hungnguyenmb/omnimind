@@ -1,3 +1,7 @@
 PyQt5>=5.15.0
 requests>=2.25.1
 cryptography>=41.0.0
+pyobjc-core>=10.3; sys_platform == "darwin"
+pyobjc-framework-AVFoundation>=10.3; sys_platform == "darwin"
+pyobjc-framework-Quartz>=10.3; sys_platform == "darwin"
+pyobjc-framework-ApplicationServices>=10.3; sys_platform == "darwin"

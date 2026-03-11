@@ -3,10 +3,11 @@ OmniMind - Tab 5: Skill Marketplace
 Kết nối API thật để xem marketplace, cài đặt và gỡ skills cho OmniMind.
 """
 from datetime import datetime
+import unicodedata
 
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
-    QFrame, QGraphicsDropShadowEffect, QGridLayout, QTabWidget,
+    QFrame, QGraphicsDropShadowEffect, QGridLayout, QTabWidget, QLineEdit,
     QScrollArea, QDialog, QMessageBox
 )
 from PyQt5.QtCore import Qt, QThread, QTimer, pyqtSignal
@@ -20,20 +21,37 @@ from engine.skill_manager import SkillManager
 class SkillLoadWorker(QThread):
     finished = pyqtSignal(dict)
 
-    def __init__(self, manager: SkillManager, parent=None):
+    def __init__(self, manager: SkillManager, page: int = 1, per_page: int = 50, parent=None):
         super().__init__(parent)
         self.manager = manager
+        self.page = max(1, int(page or 1))
+        self.per_page = max(1, int(per_page or 50))
 
     def run(self):
-        result = self.manager.fetch_marketplace_skills()
+        result = self.manager.fetch_marketplace_skills(page=self.page, per_page=self.per_page)
         if result.get("success"):
             skills = result.get("skills", [])
+            raw = result.get("raw") if isinstance(result.get("raw"), dict) else {}
+            total = int(raw.get("total", len(skills)) or len(skills))
+            page = int(raw.get("page", self.page) or self.page)
+            per_page = int(raw.get("per_page", self.per_page) or self.per_page)
             message = ""
             success = True
         else:
-            skills = self.manager.get_cached_marketplace_skills()
-            message = result.get("message", "Không kết nối được server, đang dùng dữ liệu cache.")
-            success = bool(skills)
+            if self.page == 1:
+                skills = self.manager.get_cached_marketplace_skills()
+                total = len(skills)
+                page = 1
+                per_page = self.per_page
+                message = result.get("message", "Không kết nối được server, đang dùng dữ liệu cache.")
+                success = bool(skills)
+            else:
+                skills = []
+                total = 0
+                page = self.page
+                per_page = self.per_page
+                message = result.get("message", "Không tải thêm được skills.")
+                success = False
 
         installed = self.manager.get_installed_skills()
         installed_ids = {row.get("skill_id") for row in installed}
@@ -42,6 +60,9 @@ class SkillLoadWorker(QThread):
             "skills": skills,
             "installed_ids": installed_ids,
             "message": message,
+            "page": page,
+            "per_page": per_page,
+            "total": total,
         })
 
 
@@ -364,6 +385,8 @@ class SkillDetailDialog(QDialog):
 
 
 class SkillStorePage(QWidget):
+    DEFAULT_PER_PAGE = 50
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.manager = SkillManager()
@@ -376,6 +399,13 @@ class SkillStorePage(QWidget):
         self._payment_cancelled_by_user = False
         self._pending_action = None
         self._pending_payment = None
+        self._search_query = ""
+        self._last_sync_message = ""
+        self._current_page = 0
+        self._total_skills = 0
+        self._per_page = self.DEFAULT_PER_PAGE
+        self._has_more = False
+        self._pending_append = False
         self._setup_ui()
         self._reload_data()
 
@@ -406,6 +436,14 @@ class SkillStorePage(QWidget):
         toolbar.addWidget(self.status_label)
         toolbar.addStretch()
 
+        self.search_input = QLineEdit()
+        self.search_input.setPlaceholderText("🔎 Tìm skill theo tên, mô tả, tác giả...")
+        self.search_input.setClearButtonEnabled(True)
+        self.search_input.setMinimumHeight(38)
+        self.search_input.setMinimumWidth(340)
+        self.search_input.textChanged.connect(self._on_search_changed)
+        toolbar.addWidget(self.search_input)
+
         self.refresh_btn = QPushButton("  Làm mới")
         self.refresh_btn.setObjectName("SecondaryBtn")
         self.refresh_btn.setIcon(Icons.refresh("#3B82F6", 16))
@@ -419,32 +457,136 @@ class SkillStorePage(QWidget):
         self.tabs.setObjectName("SkillTabs")
         layout.addWidget(self.tabs, 1)
 
+        pager_row = QHBoxLayout()
+        pager_row.addStretch()
+        self.load_more_btn = QPushButton("  Tải thêm")
+        self.load_more_btn.setObjectName("SecondaryBtn")
+        self.load_more_btn.setIcon(Icons.download("#3B82F6", 16))
+        self.load_more_btn.setCursor(Qt.PointingHandCursor)
+        self.load_more_btn.setMinimumHeight(36)
+        self.load_more_btn.clicked.connect(self._load_more)
+        self.load_more_btn.setVisible(False)
+        pager_row.addWidget(self.load_more_btn)
+        pager_row.addStretch()
+        layout.addLayout(pager_row)
+
     def _set_busy(self, busy: bool, text: str = ""):
         self.refresh_btn.setEnabled(not busy)
+        self.search_input.setEnabled(not busy)
+        if busy:
+            self.load_more_btn.setEnabled(False)
+        else:
+            self.load_more_btn.setEnabled(self._has_more)
         if text:
             self.status_label.setText(text)
+
+    @staticmethod
+    def _normalize_text(value: str) -> str:
+        raw = str(value or "").strip().lower()
+        if not raw:
+            return ""
+        normalized = unicodedata.normalize("NFD", raw)
+        no_accent = "".join(ch for ch in normalized if unicodedata.category(ch) != "Mn")
+        return " ".join(no_accent.split())
+
+    def _skill_matches_query(self, skill: dict, query_norm: str) -> bool:
+        if not query_norm:
+            return True
+        fields = [
+            skill.get("name", ""),
+            skill.get("short", ""),
+            skill.get("description", ""),
+            skill.get("author", ""),
+            skill.get("id", ""),
+        ]
+        for field in fields:
+            if query_norm in self._normalize_text(str(field or "")):
+                return True
+        return False
+
+    def _filtered_skills(self, installed_only: bool = False) -> list[dict]:
+        query_norm = self._normalize_text(self._search_query)
+        source = self.skills
+        if installed_only:
+            source = [s for s in self.skills if s.get("id") in self.installed_ids]
+        return [s for s in source if self._skill_matches_query(s, query_norm)]
+
+    def _update_status_summary(self):
+        if self._search_query.strip():
+            total = len(self.skills)
+            filtered = len(self._filtered_skills(installed_only=False))
+            installed_total = len([s for s in self.skills if s.get("id") in self.installed_ids])
+            installed_filtered = len(self._filtered_skills(installed_only=True))
+            self.status_label.setText(
+                f"Kết quả: {filtered}/{total} skills · Đã cài: {installed_filtered}/{installed_total}"
+            )
+            return
+        if self._last_sync_message:
+            self.status_label.setText(self._last_sync_message)
+            return
+        if self._total_skills > 0:
+            self.status_label.setText(
+                f"Sẵn sàng · đã tải {len(self.skills)}/{self._total_skills} skills"
+                f" (trang {max(1, self._current_page)})"
+            )
+        else:
+            self.status_label.setText(f"Sẵn sàng · {len(self.skills)} skills")
+
+    def _on_search_changed(self, text: str):
+        self._search_query = str(text or "")
+        self.load_more_btn.setVisible(self._has_more and not bool(self._search_query.strip()))
+        self.load_more_btn.setEnabled(self._has_more and not bool(self._search_query.strip()))
+        if self._load_worker and self._load_worker.isRunning():
+            return
+        self._rebuild_tabs()
+        self._update_status_summary()
 
     def _reload_data(self):
         if self._load_worker and self._load_worker.isRunning():
             return
+        self._pending_append = False
         self._set_busy(True, "Đang tải marketplace...")
-        self._load_worker = SkillLoadWorker(self.manager, self)
+        self._load_worker = SkillLoadWorker(self.manager, page=1, per_page=self._per_page, parent=self)
+        self._load_worker.finished.connect(self._on_loaded)
+        self._load_worker.start()
+
+    def _load_more(self):
+        if not self._has_more:
+            return
+        if self._load_worker and self._load_worker.isRunning():
+            return
+        next_page = self._current_page + 1 if self._current_page > 0 else 2
+        self._pending_append = True
+        self._set_busy(True, f"Đang tải thêm skills (trang {next_page})...")
+        self._load_worker = SkillLoadWorker(self.manager, page=next_page, per_page=self._per_page, parent=self)
         self._load_worker.finished.connect(self._on_loaded)
         self._load_worker.start()
 
     def _on_loaded(self, payload: dict):
         self._set_busy(False)
         self._load_worker = None
-        self.skills = payload.get("skills", [])
+        incoming = payload.get("skills", [])
+        if self._pending_append:
+            existing_ids = {str(s.get("id", "")).strip() for s in self.skills}
+            appended = [s for s in incoming if str(s.get("id", "")).strip() not in existing_ids]
+            self.skills.extend(appended)
+        else:
+            self.skills = incoming
+
         self.installed_ids = set(payload.get("installed_ids", set()))
+        self._current_page = int(payload.get("page", self._current_page or 1) or 1)
+        self._per_page = int(payload.get("per_page", self._per_page or self.DEFAULT_PER_PAGE) or self.DEFAULT_PER_PAGE)
+        self._total_skills = int(payload.get("total", len(self.skills)) or len(self.skills))
+        self._has_more = len(self.skills) < self._total_skills
+        self.load_more_btn.setVisible(self._has_more and not bool(self._search_query.strip()))
+        self.load_more_btn.setEnabled(self._has_more)
 
         msg = payload.get("message", "")
-        if msg:
-            self.status_label.setText(msg)
-        else:
-            self.status_label.setText(f"Sẵn sàng · {len(self.skills)} skills")
+        self._last_sync_message = msg
+        self._pending_append = False
 
         self._rebuild_tabs()
+        self._update_status_summary()
 
     def _rebuild_tabs(self):
         while self.tabs.count():
@@ -465,10 +607,17 @@ class SkillStorePage(QWidget):
         grid.setColumnStretch(1, 1)
         grid.setColumnStretch(2, 1)
 
-        for i, skill in enumerate(self.skills):
+        filtered_skills = self._filtered_skills(installed_only=False)
+        for i, skill in enumerate(filtered_skills):
             installed = skill.get("id") in self.installed_ids
             card = self._create_skill_card(skill, installed=installed)
             grid.addWidget(card, i // 3, i % 3, Qt.AlignTop)
+
+        if not filtered_skills:
+            empty = QLabel("Không tìm thấy skill phù hợp.")
+            empty.setStyleSheet("font-size: 14px; color: #94A3B8; padding: 8px;")
+            empty.setAlignment(Qt.AlignCenter)
+            grid.addWidget(empty, 0, 0, 1, 3, Qt.AlignCenter)
 
         scroll.setWidget(container)
         return scroll
@@ -486,10 +635,16 @@ class SkillStorePage(QWidget):
         grid.setColumnStretch(1, 1)
         grid.setColumnStretch(2, 1)
 
-        installed_skills = [s for s in self.skills if s.get("id") in self.installed_ids]
+        installed_skills = self._filtered_skills(installed_only=True)
         for i, skill in enumerate(installed_skills):
             card = self._create_skill_card(skill, installed=True)
             grid.addWidget(card, i // 3, i % 3, Qt.AlignTop)
+
+        if not installed_skills:
+            empty = QLabel("Chưa có skill đã cài khớp điều kiện tìm kiếm.")
+            empty.setStyleSheet("font-size: 14px; color: #94A3B8; padding: 8px;")
+            empty.setAlignment(Qt.AlignCenter)
+            grid.addWidget(empty, 0, 0, 1, 3, Qt.AlignCenter)
 
         scroll.setWidget(container)
         return scroll
