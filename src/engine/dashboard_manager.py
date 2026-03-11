@@ -3,6 +3,7 @@ import platform
 from engine.config_manager import ConfigManager
 from engine.update_manager import UpdateManager
 from engine.telegram_bot_service import get_global_telegram_bot_service
+from engine.zalo_connection_monitor import get_global_zalo_connection_monitor
 
 logger = logging.getLogger(__name__)
 
@@ -78,6 +79,11 @@ class DashboardManager:
             "running": service.is_running(),
             "enabled": ConfigManager.get("bot_enabled", "False") == "True",
         }
+
+    def get_zalo_connection_status(self) -> dict:
+        monitor = get_global_zalo_connection_monitor()
+        monitor.start()
+        return monitor.get_status()
 
     def get_system_info(self) -> dict:
         """Lấy thông tin hệ thống cho Dashboard."""

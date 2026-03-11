@@ -7,13 +7,16 @@ from PyQt5.QtWidgets import (
     QLineEdit, QComboBox, QFrame, QGraphicsDropShadowEffect,
     QCheckBox, QFileDialog, QScrollArea, QMessageBox, QProgressBar, QSizePolicy
 )
-from PyQt5.QtCore import Qt, QSize, QThread, pyqtSignal
+from PyQt5.QtCore import Qt, QSize, QThread, pyqtSignal, QTimer
 from PyQt5.QtGui import QColor
 from ui.icons import Icons
 from engine.config_manager import ConfigManager
 from engine.environment_manager import EnvironmentManager
+from engine.openzca_manager import OpenZcaManager
 from engine.permission_manager import PermissionManager
+from engine.zalo_connection_monitor import get_global_zalo_connection_monitor
 import logging
+import time
 
 logger = logging.getLogger(__name__)
 
@@ -142,12 +145,87 @@ class CodexInstallWorker(QThread):
             self.finished.emit({"success": False, "message": f"Lỗi cài OmniMind: {str(e)[:80]}"})
 
 
+class OpenZcaRuntimeWorker(QThread):
+    finished = pyqtSignal(dict)
+
+    def __init__(self, manager: OpenZcaManager | None, operation: str, parent=None):
+        super().__init__(parent)
+        self.manager = manager
+        self.operation = str(operation or "inspect").strip().lower()
+
+    def run(self):
+        if self.manager is None:
+            self.finished.emit({"success": False, "message": "Không thể khởi tạo OpenZCA Manager."})
+            return
+        try:
+            if self.operation == "install":
+                result = self.manager.install_openzca()
+            elif self.operation == "repair":
+                result = self.manager.repair_openzca()
+            else:
+                result = self.manager.inspect_runtime()
+        except Exception as e:
+            logger.exception("OpenZCA runtime worker failed")
+            result = {"success": False, "message": f"Lỗi OpenZCA: {str(e)[:120]}"}
+        self.finished.emit(result)
+
+
+class OpenZcaAuthWorker(QThread):
+    finished = pyqtSignal(dict)
+
+    def __init__(self, manager: OpenZcaManager | None, operation: str, parent=None):
+        super().__init__(parent)
+        self.manager = manager
+        self.operation = str(operation or "status").strip().lower()
+
+    def run(self):
+        if self.manager is None:
+            self.finished.emit({"success": False, "message": "Không thể khởi tạo OpenZCA Manager."})
+            return
+        try:
+            if self.operation == "login":
+                result = self.manager.run_auth_login()
+            elif self.operation == "logout":
+                result = self.manager.run_auth_logout()
+            else:
+                result = self.manager.run_auth_status()
+        except Exception as e:
+            logger.exception("OpenZCA auth worker failed")
+            result = {"success": False, "message": f"Lỗi auth OpenZCA: {str(e)[:120]}"}
+        self.finished.emit(result)
+
+
+class ZaloStatusWorker(QThread):
+    finished = pyqtSignal(dict)
+
+    def __init__(self, monitor, parent=None):
+        super().__init__(parent)
+        self.monitor = monitor
+
+    def run(self):
+        if self.monitor is None:
+            self.finished.emit({"success": False, "message": "Không thể khởi tạo bộ theo dõi Zalo."})
+            return
+        try:
+            result = self.monitor.refresh_once()
+            result = {"success": True, **(result or {})}
+        except Exception as e:
+            logger.exception("Zalo status worker failed")
+            result = {"success": False, "message": f"Lỗi cập nhật Zalo: {str(e)[:120]}"}
+        self.finished.emit(result)
+
+
 class AuthPage(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._verify_worker = None
         self._runtime_worker = None
         self._codex_install_worker = None
+        self._openzca_worker = None
+        self._openzca_auth_worker = None
+        self._zalo_status_worker = None
+        self._pending_openzca_auth_op = ""
+        self._last_zalo_auto_refresh_ts = 0.0
         self._missing_runtime = []
         self._runtime_installing = False
         self._codex_installing = False
@@ -160,6 +238,12 @@ class AuthPage(QWidget):
         except Exception as e:
             logger.error(f"EnvironmentManager init failed: {e}")
             self.env_manager = None
+        try:
+            self.openzca_manager = OpenZcaManager(self.env_manager) if self.env_manager else OpenZcaManager()
+        except Exception as e:
+            logger.error(f"OpenZcaManager init failed: {e}")
+            self.openzca_manager = None
+        self.zalo_monitor = get_global_zalo_connection_monitor()
         try:
             self.permission_manager = PermissionManager()
         except Exception as e:
@@ -262,6 +346,134 @@ class AuthPage(QWidget):
         ws_layout.addLayout(ws_row)
 
         layout.addWidget(ws_card)
+
+        # ── Zalo Connection Card ──
+        zalo_card = self._create_card("💬  Kết nối Zalo")
+        zalo_layout = zalo_card.layout()
+
+        zalo_status_row = QHBoxLayout()
+        zalo_status_icon = QLabel("⚪")
+        zalo_status_icon.setFixedWidth(20)
+        zalo_status_icon.setStyleSheet("font-size: 14px; background: transparent;")
+        self.zalo_runtime_status_icon = zalo_status_icon
+        self.zalo_runtime_status_label = QLabel("Chưa kiểm tra môi trường Zalo.")
+        self.zalo_runtime_status_label.setStyleSheet("font-size: 14px; font-weight: 600; color: #94A3B8;")
+        zalo_status_row.addWidget(zalo_status_icon)
+        zalo_status_row.addWidget(self.zalo_runtime_status_label)
+        zalo_status_row.addStretch()
+
+        self.zalo_check_btn = QPushButton("  Kiểm tra môi trường")
+        self.zalo_check_btn.setObjectName("SecondaryBtn")
+        self.zalo_check_btn.setIcon(Icons.refresh("#3B82F6", 16))
+        self.zalo_check_btn.setCursor(Qt.PointingHandCursor)
+        self.zalo_check_btn.setFixedHeight(40)
+        self.zalo_check_btn.clicked.connect(self._check_openzca_runtime)
+        zalo_status_row.addWidget(self.zalo_check_btn)
+
+        self.zalo_install_btn = QPushButton("  Cài môi trường")
+        self.zalo_install_btn.setObjectName("PrimaryBtn")
+        self.zalo_install_btn.setIcon(Icons.download("#FFFFFF", 16))
+        self.zalo_install_btn.setCursor(Qt.PointingHandCursor)
+        self.zalo_install_btn.setFixedHeight(40)
+        self.zalo_install_btn.clicked.connect(self._install_openzca_runtime)
+        zalo_status_row.addWidget(self.zalo_install_btn)
+
+        self.zalo_repair_btn = QPushButton("  Khắc phục môi trường")
+        self.zalo_repair_btn.setObjectName("SecondaryBtn")
+        self.zalo_repair_btn.setIcon(Icons.refresh("#3B82F6", 16))
+        self.zalo_repair_btn.setCursor(Qt.PointingHandCursor)
+        self.zalo_repair_btn.setFixedHeight(40)
+        self.zalo_repair_btn.clicked.connect(self._repair_openzca_runtime)
+        zalo_status_row.addWidget(self.zalo_repair_btn)
+
+        zalo_layout.addLayout(zalo_status_row)
+
+        self.zalo_runtime_hint = QLabel("")
+        self.zalo_runtime_hint.setStyleSheet("font-size: 12px; color: #64748B;")
+        self.zalo_runtime_hint.setWordWrap(True)
+        self.zalo_runtime_hint.setVisible(False)
+        zalo_layout.addWidget(self.zalo_runtime_hint)
+
+        self.zalo_runtime_meta = QLabel("")
+        self.zalo_runtime_meta.setStyleSheet("font-size: 12px; color: #334155;")
+        self.zalo_runtime_meta.setWordWrap(True)
+        zalo_layout.addWidget(self.zalo_runtime_meta)
+
+        self.zalo_runtime_paths = QLabel("")
+        self.zalo_runtime_paths.setStyleSheet("font-size: 12px; color: #64748B;")
+        self.zalo_runtime_paths.setWordWrap(True)
+        self.zalo_runtime_paths.setVisible(False)
+        zalo_layout.addWidget(self.zalo_runtime_paths)
+
+        self.zalo_runtime_progress = QProgressBar()
+        self.zalo_runtime_progress.setRange(0, 100)
+        self.zalo_runtime_progress.setValue(0)
+        self.zalo_runtime_progress.setVisible(False)
+        self.zalo_runtime_progress.setFixedHeight(18)
+        zalo_layout.addWidget(self.zalo_runtime_progress)
+
+        self.zalo_runtime_progress_text = QLabel("")
+        self.zalo_runtime_progress_text.setStyleSheet("font-size: 12px; color: #64748B;")
+        self.zalo_runtime_progress_text.setWordWrap(True)
+        self.zalo_runtime_progress_text.setVisible(False)
+        zalo_layout.addWidget(self.zalo_runtime_progress_text)
+
+        auth_sep = QFrame()
+        auth_sep.setFrameShape(QFrame.HLine)
+        auth_sep.setStyleSheet("color: #E2E8F0;")
+        zalo_layout.addWidget(auth_sep)
+
+        self.zalo_auth_status_label = QLabel("Trạng thái đăng nhập: Not logged in")
+        self.zalo_auth_status_label.setStyleSheet("font-size: 14px; font-weight: 600; color: #64748B;")
+        self.zalo_auth_status_label.setWordWrap(True)
+        zalo_layout.addWidget(self.zalo_auth_status_label)
+
+        self.zalo_auth_hint = QLabel("Đăng nhập Zalo để chuẩn bị cho các phase bot listener và auto-reply.")
+        self.zalo_auth_hint.setStyleSheet("font-size: 12px; color: #64748B;")
+        self.zalo_auth_hint.setWordWrap(True)
+        zalo_layout.addWidget(self.zalo_auth_hint)
+
+        self.zalo_auth_meta = QLabel("")
+        self.zalo_auth_meta.setStyleSheet("font-size: 12px; color: #334155;")
+        self.zalo_auth_meta.setWordWrap(True)
+        zalo_layout.addWidget(self.zalo_auth_meta)
+
+        zalo_auth_btn_row = QHBoxLayout()
+        self.zalo_refresh_auth_btn = QPushButton("  Cập nhật trạng thái")
+        self.zalo_refresh_auth_btn.setObjectName("SecondaryBtn")
+        self.zalo_refresh_auth_btn.setIcon(Icons.refresh("#3B82F6", 16))
+        self.zalo_refresh_auth_btn.setCursor(Qt.PointingHandCursor)
+        self.zalo_refresh_auth_btn.setFixedHeight(40)
+        self.zalo_refresh_auth_btn.clicked.connect(self._refresh_zalo_auth_status)
+        zalo_auth_btn_row.addWidget(self.zalo_refresh_auth_btn)
+
+        self.zalo_login_btn = QPushButton("  Login Zalo")
+        self.zalo_login_btn.setObjectName("PrimaryBtn")
+        self.zalo_login_btn.setIcon(Icons.check_circle("#FFFFFF", 16))
+        self.zalo_login_btn.setCursor(Qt.PointingHandCursor)
+        self.zalo_login_btn.setFixedHeight(40)
+        self.zalo_login_btn.clicked.connect(self._login_zalo)
+        zalo_auth_btn_row.addWidget(self.zalo_login_btn)
+
+        self.zalo_relogin_btn = QPushButton("  Re-login Zalo")
+        self.zalo_relogin_btn.setObjectName("SecondaryBtn")
+        self.zalo_relogin_btn.setIcon(Icons.refresh("#3B82F6", 16))
+        self.zalo_relogin_btn.setCursor(Qt.PointingHandCursor)
+        self.zalo_relogin_btn.setFixedHeight(40)
+        self.zalo_relogin_btn.clicked.connect(self._relogin_zalo)
+        zalo_auth_btn_row.addWidget(self.zalo_relogin_btn)
+
+        self.zalo_logout_btn = QPushButton("  Logout Zalo")
+        self.zalo_logout_btn.setObjectName("SecondaryBtn")
+        self.zalo_logout_btn.setIcon(Icons.power("#EF4444", 16))
+        self.zalo_logout_btn.setCursor(Qt.PointingHandCursor)
+        self.zalo_logout_btn.setFixedHeight(40)
+        self.zalo_logout_btn.clicked.connect(self._logout_zalo)
+        zalo_auth_btn_row.addWidget(self.zalo_logout_btn)
+        zalo_auth_btn_row.addStretch()
+        zalo_layout.addLayout(zalo_auth_btn_row)
+
+        layout.addWidget(zalo_card)
 
         # ── OmniMind CLI Authentication Card ──
         codex_card = self._create_card("🧠  Xác thực OmniMind")
@@ -441,6 +653,14 @@ class AuthPage(QWidget):
 
         # Auto-check khi khởi động
         self._check_codex_installed()
+        self._check_openzca_runtime()
+        self.zalo_monitor.start()
+        QTimer.singleShot(0, self._refresh_zalo_auth_status)
+        self._zalo_status_timer = QTimer(self)
+        self._zalo_status_timer.setInterval(3000)
+        self._zalo_status_timer.timeout.connect(self._tick_zalo_status)
+        self._zalo_status_timer.start()
+        self._sync_zalo_status_display()
 
         # ── Security & Preferences Card ──
         sec_card = self._create_card("🛡  Bảo mật & Tuỳ chọn")
@@ -618,6 +838,313 @@ class AuthPage(QWidget):
         else:
             self.codex_progress.setValue(0)
             self.codex_progress_text.setText("")
+
+    def _set_zalo_runtime_progress(self, visible: bool, message: str = "", busy: bool = False):
+        self.zalo_runtime_progress.setVisible(visible)
+        self.zalo_runtime_progress_text.setVisible(visible)
+        if visible:
+            if busy:
+                self.zalo_runtime_progress.setRange(0, 0)
+            else:
+                self.zalo_runtime_progress.setRange(0, 100)
+                self.zalo_runtime_progress.setValue(100)
+            self.zalo_runtime_progress_text.setText(message)
+        else:
+            self.zalo_runtime_progress.setRange(0, 100)
+            self.zalo_runtime_progress.setValue(0)
+            self.zalo_runtime_progress_text.setText("")
+
+    def _set_openzca_actions_enabled(self, enabled: bool):
+        self.zalo_check_btn.setEnabled(enabled)
+        self.zalo_install_btn.setEnabled(enabled)
+        self.zalo_repair_btn.setEnabled(enabled)
+
+    def _set_openzca_auth_actions_enabled(self, enabled: bool):
+        self.zalo_refresh_auth_btn.setEnabled(enabled)
+        self.zalo_login_btn.setEnabled(enabled)
+        self.zalo_relogin_btn.setEnabled(enabled)
+        self.zalo_logout_btn.setEnabled(enabled)
+
+    def _has_active_zalo_worker(self) -> bool:
+        workers = (
+            self._openzca_worker,
+            self._openzca_auth_worker,
+            self._zalo_status_worker,
+        )
+        return any(worker and worker.isRunning() for worker in workers)
+
+    def _sync_zalo_button_states(self):
+        status = self.zalo_monitor.get_status() if self.zalo_monitor else ConfigManager.get_zalo_connection_status()
+        state = str(status.get("login_state") or "not_logged_in")
+        runtime_ready = str(status.get("install_status") or "").strip().lower() == "ready"
+        busy = self._has_active_zalo_worker()
+
+        self.zalo_check_btn.setEnabled(not busy)
+        self.zalo_install_btn.setEnabled(not busy)
+        self.zalo_repair_btn.setEnabled(not busy)
+
+        self.zalo_login_btn.setVisible(runtime_ready and state in {"not_logged_in", "re_auth_required"})
+        self.zalo_relogin_btn.setVisible(runtime_ready and state in {"connected", "re_auth_required"})
+        self.zalo_logout_btn.setVisible(runtime_ready and state == "connected")
+
+        self.zalo_refresh_auth_btn.setEnabled(not busy)
+        self.zalo_login_btn.setEnabled(not busy and self.zalo_login_btn.isVisible())
+        self.zalo_relogin_btn.setEnabled(not busy and self.zalo_relogin_btn.isVisible())
+        self.zalo_logout_btn.setEnabled(not busy and self.zalo_logout_btn.isVisible())
+
+    def _tick_zalo_status(self):
+        self._sync_zalo_status_display()
+        status = self.zalo_monitor.get_status() if self.zalo_monitor else ConfigManager.get_zalo_connection_status()
+        if str(status.get("login_state") or "not_logged_in") != "qr_required":
+            return
+        if self._has_active_zalo_worker():
+            return
+        now_ts = time.time()
+        if now_ts - self._last_zalo_auto_refresh_ts < 3.0:
+            return
+        self._last_zalo_auto_refresh_ts = now_ts
+        self._run_zalo_status_worker()
+
+    def _run_openzca_worker(self, operation: str):
+        if self._has_active_zalo_worker():
+            return
+        op = str(operation or "inspect").strip().lower()
+        status_map = {
+            "inspect": ("Đang kiểm tra môi trường Zalo...", "Đang kiểm tra môi trường kết nối Zalo..."),
+            "install": ("Đang cài môi trường Zalo...", "Đang chuẩn bị môi trường kết nối Zalo..."),
+            "repair": ("Đang khắc phục môi trường Zalo...", "Đang làm sạch và cài lại môi trường kết nối Zalo..."),
+        }
+        title, progress = status_map.get(op, status_map["inspect"])
+        self._set_openzca_actions_enabled(False)
+        self._set_openzca_auth_actions_enabled(False)
+        self.zalo_runtime_status_icon.setText("🟡")
+        self.zalo_runtime_status_label.setText(title)
+        self.zalo_runtime_status_label.setStyleSheet("font-size: 14px; font-weight: 600; color: #3B82F6;")
+        self._set_zalo_runtime_progress(True, progress, busy=True)
+        self._openzca_worker = OpenZcaRuntimeWorker(self.openzca_manager, op, self)
+        self._openzca_worker.finished.connect(self._on_openzca_worker_finished)
+        self._openzca_worker.start()
+
+    def _check_openzca_runtime(self):
+        self._run_openzca_worker("inspect")
+
+    def _install_openzca_runtime(self):
+        self._run_openzca_worker("install")
+
+    def _repair_openzca_runtime(self):
+        self._run_openzca_worker("repair")
+
+    def _run_openzca_auth_worker(self, operation: str):
+        if self._has_active_zalo_worker():
+            return
+        op = str(operation or "status").strip().lower()
+        self._pending_openzca_auth_op = op
+        label_map = {
+            "status": "Đang refresh trạng thái Zalo...",
+            "login": "Đang khởi tạo login Zalo...",
+            "logout": "Đang đăng xuất Zalo...",
+        }
+        self._set_openzca_actions_enabled(False)
+        self._set_openzca_auth_actions_enabled(False)
+        self.zalo_auth_hint.setText(label_map.get(op, "Đang xử lý Zalo..."))
+        self._openzca_auth_worker = OpenZcaAuthWorker(self.openzca_manager, op, self)
+        self._openzca_auth_worker.finished.connect(self._on_openzca_auth_finished)
+        self._openzca_auth_worker.start()
+
+    def _run_zalo_status_worker(self):
+        if self._has_active_zalo_worker():
+            return
+        self._set_openzca_actions_enabled(False)
+        self._set_openzca_auth_actions_enabled(False)
+        self.zalo_auth_hint.setText("Đang cập nhật trạng thái kết nối Zalo...")
+        self._zalo_status_worker = ZaloStatusWorker(self.zalo_monitor, self)
+        self._zalo_status_worker.finished.connect(self._on_zalo_status_worker_finished)
+        self._zalo_status_worker.start()
+
+    def _refresh_zalo_auth_status(self):
+        self._run_zalo_status_worker()
+
+    def _login_zalo(self):
+        runtime = ConfigManager.get_zalo_runtime_config()
+        if str(runtime.get("install_status") or "").strip().lower() != "ready":
+            QMessageBox.warning(
+                self,
+                "Zalo chưa sẵn sàng",
+                "Môi trường Zalo chưa sẵn sàng. Vui lòng kiểm tra hoặc cài môi trường trước khi đăng nhập.",
+            )
+            return
+        self.zalo_monitor.mark_qr_required()
+        self._sync_zalo_status_display()
+        self._run_openzca_auth_worker("login")
+
+    def _logout_zalo(self):
+        self._run_openzca_auth_worker("logout")
+
+    def _relogin_zalo(self):
+        runtime = ConfigManager.get_zalo_runtime_config()
+        if str(runtime.get("install_status") or "").strip().lower() != "ready":
+            QMessageBox.warning(
+                self,
+                "Zalo chưa sẵn sàng",
+                "Môi trường Zalo chưa sẵn sàng. Vui lòng kiểm tra hoặc cài môi trường trước khi đăng nhập.",
+            )
+            return
+        self.zalo_monitor.mark_qr_required()
+        self._sync_zalo_status_display()
+        self._run_openzca_auth_worker("login")
+
+    def _apply_openzca_runtime_status(self, result: dict):
+        status = str(result.get("install_status") or "").strip().lower()
+        success = bool(result.get("success"))
+        ready = bool(result.get("openzca_ready"))
+
+        if ready:
+            icon = "🟢"
+            color = "#10B981"
+            message = "Zalo đã sẵn sàng."
+        elif status in {"installing"}:
+            icon = "🟡"
+            color = "#3B82F6"
+            message = "Đang chuẩn bị môi trường Zalo..."
+        elif status == "missing_node":
+            icon = "🔴"
+            color = "#EF4444"
+            message = "Thiếu Node.js để kết nối Zalo."
+        elif status == "missing_npm":
+            icon = "🔴"
+            color = "#EF4444"
+            message = "Thiếu npm để kết nối Zalo."
+        elif status in {"error", "broken"} or not success:
+            icon = "🔴"
+            color = "#EF4444"
+            message = "Môi trường Zalo đang gặp lỗi."
+        else:
+            icon = "⚪"
+            color = "#94A3B8"
+            message = "Zalo chưa sẵn sàng."
+
+        self.zalo_runtime_status_icon.setText(icon)
+        self.zalo_runtime_status_label.setText(message)
+        self.zalo_runtime_status_label.setStyleSheet(f"font-size: 14px; font-weight: 600; color: {color};")
+
+        node_text = f"Node.js: {result.get('node_version') or ('OK' if result.get('node_ok') else 'Thiếu')}"
+        npm_text = f"npm: {result.get('npm_version') or ('OK' if result.get('npm_ok') else 'Thiếu')}"
+        self.zalo_runtime_meta.setText(f"{node_text} | {npm_text}")
+        self.zalo_runtime_paths.clear()
+
+        install_status = str(result.get("install_status") or "").strip().lower()
+        self.zalo_install_btn.setVisible(install_status != "ready")
+        self.zalo_repair_btn.setVisible(install_status in {"ready", "broken", "error"})
+
+    def _on_openzca_worker_finished(self, result: dict):
+        self._openzca_worker = None
+        self._set_zalo_runtime_progress(False)
+        self._apply_openzca_runtime_status(result or {})
+        self._sync_zalo_status_display()
+        self._sync_zalo_button_states()
+
+    @staticmethod
+    def _zalo_login_state_display(state: str) -> tuple[str, str]:
+        mapping = {
+            "not_logged_in": ("Not logged in", "#64748B"),
+            "qr_required": ("QR required", "#F59E0B"),
+            "connected": ("Connected", "#10B981"),
+            "re_auth_required": ("Re-auth required", "#EF4444"),
+        }
+        return mapping.get(state, ("Not logged in", "#64748B"))
+
+    @staticmethod
+    def _sanitize_zalo_message(message: str, fallback: str = "") -> str:
+        text = str(message or "").strip()
+        if not text:
+            return fallback
+        replacements = {
+            "OpenZCA": "môi trường Zalo",
+            "openzca": "môi trường Zalo",
+            "runtime OpenZCA": "môi trường Zalo",
+        }
+        for source, target in replacements.items():
+            text = text.replace(source, target)
+        return text
+
+    def _sync_zalo_status_display(self):
+        status = self.zalo_monitor.get_status() if self.zalo_monitor else ConfigManager.get_zalo_connection_status()
+        state = str(status.get("login_state") or "not_logged_in")
+        state_text, state_color = self._zalo_login_state_display(state)
+        self.zalo_auth_status_label.setText(f"Trạng thái đăng nhập: {state_text}")
+        self.zalo_auth_status_label.setStyleSheet(
+            f"font-size: 14px; font-weight: 600; color: {state_color};"
+        )
+
+        hint_map = {
+            "not_logged_in": "Chưa có session Zalo usable. Nhấn Login Zalo để bắt đầu.",
+            "qr_required": "Đang chờ quét mã QR. Ứng dụng sẽ mở mã QR hoặc lưu ảnh QR để bạn quét.",
+            "connected": "Session Zalo đang hoạt động và monitor đang theo dõi định kỳ.",
+            "re_auth_required": "Session Zalo không còn hợp lệ. Hãy dùng Re-login Zalo để đăng nhập lại.",
+        }
+        self.zalo_auth_hint.setText(hint_map.get(state, hint_map["not_logged_in"]))
+
+        meta_lines = [
+            f"Self user ID: {status.get('self_user_id') or '-'}",
+            f"Last connected: {status.get('last_connected_at') or '-'}",
+            f"Last auth ok: {status.get('last_auth_ok_at') or '-'}",
+            f"Last heartbeat: {status.get('last_heartbeat_at') or '-'}",
+        ]
+        qr_path = str(status.get("qr_path") or "").strip()
+        if qr_path:
+            meta_lines.append(f"QR path: {qr_path}")
+        last_error = str(status.get("last_monitor_error") or "").strip()
+        if last_error:
+            meta_lines.append(f"Monitor error: {self._sanitize_zalo_message(last_error)}")
+        self.zalo_auth_meta.setText("\n".join(meta_lines))
+        self._sync_zalo_button_states()
+
+    def _on_openzca_auth_finished(self, result: dict):
+        op = self._pending_openzca_auth_op
+        self._pending_openzca_auth_op = ""
+        self._openzca_auth_worker = None
+        op_msg = self._sanitize_zalo_message(result.get("message"))
+
+        if result.get("success"):
+            if op == "logout":
+                ConfigManager.set("zalo_login_state", "not_logged_in")
+                ConfigManager.set("zalo_self_user_id", "")
+                ConfigManager.set("zalo_last_connected_at", "")
+                ConfigManager.set("zalo_last_auth_ok_at", "")
+                ConfigManager.set("zalo_last_heartbeat_at", "")
+                ConfigManager.set("zalo_last_monitor_error", "")
+                ConfigManager.set("zalo_qr_path", "")
+                ConfigManager.set("zalo_qr_requested_at", "")
+                self.zalo_auth_hint.setText(op_msg or "Đã đăng xuất Zalo.")
+            else:
+                if result.get("self_user_id") is not None:
+                    ConfigManager.set("zalo_self_user_id", str(result.get("self_user_id") or "").strip())
+                ConfigManager.set("zalo_qr_path", str(result.get("qr_path") or "").strip())
+                self.zalo_auth_hint.setText(op_msg or "Thao tác Zalo thành công.")
+        else:
+            if op == "logout":
+                self.zalo_auth_hint.setText(op_msg or "Đăng xuất Zalo thất bại.")
+            else:
+                ConfigManager.set("zalo_self_user_id", str(result.get("self_user_id") or "").strip())
+                qr_path = str(result.get("qr_path") or "").strip()
+                if qr_path:
+                    ConfigManager.set("zalo_qr_path", qr_path)
+                    self.zalo_auth_hint.setText("Đang chờ bạn quét mã QR Zalo.")
+                else:
+                    self.zalo_auth_hint.setText(op_msg or "Thao tác Zalo thất bại.")
+
+        self._sync_zalo_status_display()
+        if op == "logout" or result.get("success"):
+            self._run_zalo_status_worker()
+        else:
+            self._sync_zalo_button_states()
+
+    def _on_zalo_status_worker_finished(self, result: dict):
+        self._zalo_status_worker = None
+        if not result.get("success") and result.get("message"):
+            self.zalo_auth_hint.setText(self._sanitize_zalo_message(result.get("message")))
+        self._sync_zalo_status_display()
+        self._sync_zalo_button_states()
 
     def _refresh_runtime_installer_status(self, runtime_missing: list):
         self._runtime_installer_info = {}

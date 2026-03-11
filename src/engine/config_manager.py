@@ -1,5 +1,6 @@
 import logging
 import os
+from datetime import datetime, timezone
 from pathlib import Path
 from database.db_manager import db
 
@@ -245,3 +246,98 @@ class ConfigManager:
             normalized = "workspace-write"
         cls.set("codex_sandbox_mode", normalized)
         cls.set("sandbox_mode", normalized)
+
+    @classmethod
+    def get_zalo_profile_name(cls) -> str:
+        val = cls.get("zalo_profile_name", "").strip()
+        return val or "omnimind"
+
+    @classmethod
+    def set_zalo_profile_name(cls, profile_name: str):
+        normalized = str(profile_name or "").strip() or "omnimind"
+        cls.set("zalo_profile_name", normalized)
+
+    @classmethod
+    def get_zalo_runtime_config(cls) -> dict:
+        return {
+            "profile_name": cls.get_zalo_profile_name(),
+            "openzca_version": cls.get("zalo_openzca_version", "").strip(),
+            "install_status": cls.get("zalo_openzca_install_status", "not_installed").strip() or "not_installed",
+            "last_error": cls.get("zalo_runtime_last_error", "").strip(),
+            "last_checked_at": cls.get("zalo_runtime_last_checked_at", "").strip(),
+        }
+
+    @classmethod
+    def set_zalo_runtime_status(
+        cls,
+        install_status: str,
+        version: str = "",
+        last_error: str = "",
+        checked_at: str = "",
+    ):
+        status_value = str(install_status or "").strip() or "not_installed"
+        cls.set("zalo_openzca_install_status", status_value)
+        cls.set("zalo_openzca_version", str(version or "").strip())
+        cls.set("zalo_runtime_last_error", str(last_error or "").strip())
+        checked_value = str(checked_at or "").strip()
+        if not checked_value:
+            checked_value = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+        cls.set("zalo_runtime_last_checked_at", checked_value)
+
+    @classmethod
+    def get_zalo_login_state(cls) -> str:
+        value = cls.get("zalo_login_state", "").strip().lower()
+        if value in {"not_logged_in", "qr_required", "connected", "re_auth_required"}:
+            return value
+        legacy = cls.get("zalo_login_state", "").strip()
+        if legacy == "Re-auth required":
+            return "re_auth_required"
+        return "not_logged_in"
+
+    @classmethod
+    def set_zalo_login_state(
+        cls,
+        login_state: str,
+        self_user_id: str = "",
+        last_connected_at: str = "",
+        last_auth_ok_at: str = "",
+        last_heartbeat_at: str = "",
+        last_reauth_alert_at: str = "",
+        last_monitor_error: str = "",
+        qr_path: str = "",
+        qr_requested_at: str = "",
+    ):
+        normalized = str(login_state or "").strip().lower()
+        if normalized not in {"not_logged_in", "qr_required", "connected", "re_auth_required"}:
+            normalized = "not_logged_in"
+        cls.set("zalo_login_state", normalized)
+        if self_user_id != "":
+            cls.set("zalo_self_user_id", str(self_user_id or "").strip())
+        if last_connected_at != "":
+            cls.set("zalo_last_connected_at", str(last_connected_at or "").strip())
+        if last_auth_ok_at != "":
+            cls.set("zalo_last_auth_ok_at", str(last_auth_ok_at or "").strip())
+        if last_heartbeat_at != "":
+            cls.set("zalo_last_heartbeat_at", str(last_heartbeat_at or "").strip())
+        if last_reauth_alert_at != "":
+            cls.set("zalo_last_reauth_alert_at", str(last_reauth_alert_at or "").strip())
+        if last_monitor_error != "":
+            cls.set("zalo_last_monitor_error", str(last_monitor_error or "").strip())
+        if qr_path != "":
+            cls.set("zalo_qr_path", str(qr_path or "").strip())
+        if qr_requested_at != "":
+            cls.set("zalo_qr_requested_at", str(qr_requested_at or "").strip())
+
+    @classmethod
+    def get_zalo_connection_status(cls) -> dict:
+        return {
+            "login_state": cls.get_zalo_login_state(),
+            "self_user_id": cls.get("zalo_self_user_id", "").strip(),
+            "last_connected_at": cls.get("zalo_last_connected_at", "").strip(),
+            "last_auth_ok_at": cls.get("zalo_last_auth_ok_at", "").strip(),
+            "last_heartbeat_at": cls.get("zalo_last_heartbeat_at", "").strip(),
+            "last_reauth_alert_at": cls.get("zalo_last_reauth_alert_at", "").strip(),
+            "last_monitor_error": cls.get("zalo_last_monitor_error", "").strip(),
+            "qr_path": cls.get("zalo_qr_path", "").strip(),
+            "qr_requested_at": cls.get("zalo_qr_requested_at", "").strip(),
+        }
