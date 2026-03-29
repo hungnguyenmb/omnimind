@@ -32,6 +32,8 @@ class AssistantMemoryManager:
         re.compile(r"^\s*(toi muon|hay luon|uu tien|dung|khong duoc)\b.+", re.IGNORECASE),
         re.compile(r"^\s*(my preference|always|never|prefer)\b.+", re.IGNORECASE),
     ]
+    FILE_REF_PATTERN = re.compile(r"(?<!\w)([\w.\-À-ỹ]+?\.(?:md|markdown|txt|pdf|docx|xlsx|csv|json|log|py|js|ts|yaml|yml))(?!\w)", re.IGNORECASE)
+    PATH_PATTERN = re.compile(r"(?<![\w.\-])(~/[^\s`'\"]+|/[^\s`'\"]+|[A-Za-z]:\\[^\s`'\"]+)")
 
     @staticmethod
     def _normalize_role(role: str) -> str:
@@ -89,6 +91,99 @@ class AssistantMemoryManager:
         if len(body) <= limit:
             return body
         return body[: max(1, limit - 1)].rstrip() + "…"
+
+    def _extract_file_refs(self, text: str, limit: int = 12) -> list[str]:
+        out: list[str] = []
+        seen = set()
+        for match in self.FILE_REF_PATTERN.finditer(str(text or "")):
+            value = str(match.group(1) or "").strip()
+            key = value.lower()
+            if not value or key in seen:
+                continue
+            seen.add(key)
+            out.append(value)
+            if len(out) >= limit:
+                break
+        return out
+
+    def _extract_paths(self, text: str, limit: int = 8) -> list[str]:
+        out: list[str] = []
+        seen = set()
+        for match in self.PATH_PATTERN.finditer(str(text or "")):
+            value = str(match.group(1) or "").strip().rstrip(".,:;")
+            if not value or value in seen:
+                continue
+            seen.add(value)
+            out.append(value)
+            if len(out) >= limit:
+                break
+        return out
+
+    def _should_compact_for_retrieval(self, role: str, body: str, metadata: dict[str, Any]) -> bool:
+        normalized_role = self._normalize_role(role)
+        if normalized_role not in {"assistant", "tool"}:
+            return False
+        line_count = len([ln for ln in str(body or "").splitlines() if ln.strip()])
+        if len(body) >= 900 or line_count >= 12:
+            return True
+        if len(self._extract_file_refs(body, limit=10)) >= 6:
+            return True
+        if len(self._extract_paths(body, limit=10)) >= 3:
+            return True
+        trace = (metadata or {}).get("central_ai_trace") if isinstance(metadata, dict) else {}
+        if isinstance(trace, dict) and (
+            trace.get("used_builtin_functions")
+            or trace.get("used_tools")
+            or trace.get("tool_loop_trace")
+        ):
+            return len(body) >= 500 or line_count >= 8
+        return False
+
+    def _build_retrieval_compact_content(self, role: str, body: str, metadata: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+        meta = dict(metadata or {})
+        if not self._should_compact_for_retrieval(role, body, meta):
+            return body, meta
+
+        lines = [ln.strip(" \t-") for ln in str(body or "").splitlines() if ln.strip()]
+        summary_lines: list[str] = []
+        for line in lines:
+            low = line.lower()
+            if low.startswith("workspace:") or low.startswith("###"):
+                summary_lines.append(self._shorten(line, 180))
+            elif not low.startswith("/") and not line.startswith("`/"):
+                summary_lines.append(self._shorten(line, 180))
+            if len(summary_lines) >= 4:
+                break
+        if not summary_lines and body:
+            summary_lines.append(self._shorten(body, 240))
+
+        file_refs = self._extract_file_refs(body, limit=12)
+        paths = self._extract_paths(body, limit=8)
+        trace = meta.get("central_ai_trace") if isinstance(meta.get("central_ai_trace"), dict) else {}
+        used_tools = []
+        if isinstance(trace, dict):
+            used_tools = [str(item).strip() for item in (trace.get("used_tools") or []) if str(item).strip()]
+
+        compact_parts = ["[retrieval_compact]"]
+        if summary_lines:
+            compact_parts.append("Tóm tắt phản hồi trước:")
+            compact_parts.extend([f"- {line}" for line in summary_lines[:4]])
+        if file_refs:
+            compact_parts.append("File quan trọng:")
+            compact_parts.extend([f"- {name}" for name in file_refs[:12]])
+        if paths:
+            compact_parts.append("Path quan trọng:")
+            compact_parts.extend([f"- {path}" for path in paths[:8]])
+        if used_tools:
+            compact_parts.append("Tool đã dùng: " + ", ".join(used_tools[:6]))
+
+        compact = "\n".join(compact_parts).strip()
+        meta.setdefault("display_content", body)
+        meta["retrieval_compacted"] = True
+        meta["retrieval_compact_version"] = 1
+        meta["important_file_refs"] = file_refs
+        meta["important_paths"] = paths
+        return compact, meta
 
     def get_profile(self) -> dict[str, Any]:
         row = db.fetch_one(
@@ -154,6 +249,8 @@ class AssistantMemoryManager:
         body = str(content or "").strip()
         if not body:
             return None
+        normalized_role = self._normalize_role(role)
+        normalized_body, normalized_metadata = self._build_retrieval_compact_content(normalized_role, body, metadata or {})
 
         source_name = str(source or "local").strip() or "local"
         ext_id = self._normalize_external_id(external_id)
@@ -177,12 +274,12 @@ class AssistantMemoryManager:
                 VALUES (?, ?, ?, ?, ?, ?)
                 """,
                 (
-                    self._normalize_role(role),
-                    body,
+                    normalized_role,
+                    normalized_body,
                     source_name,
                     ext_id,
-                    self._estimate_token_count(body),
-                    self._to_json(metadata),
+                    self._estimate_token_count(normalized_body),
+                    self._to_json(normalized_metadata),
                 ),
                 commit=True,
             )
@@ -209,6 +306,7 @@ class AssistantMemoryManager:
                     "id": row["id"],
                     "role": row.get("role", "user"),
                     "content": row.get("content", ""),
+                    "display_content": self._from_json(row.get("metadata_json", "{}")).get("display_content", row.get("content", "")),
                     "source": row.get("source", "local"),
                     "external_id": row.get("external_id", ""),
                     "token_estimate": int(row.get("token_estimate", 0) or 0),

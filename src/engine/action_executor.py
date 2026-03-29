@@ -18,6 +18,10 @@ class ActionExecutor:
     """
 
     CAPABILITY_MATRIX = {
+        "fs_read": {"permissions": []},
+        "fs_write": {"permissions": []},
+        "exec": {"permissions": []},
+        "network": {"permissions": []},
         "screen_capture": {
             "permissions": ["screenshot"],
             "permissions_by_os": {"darwin": ["screenshot"], "windows": ["screenshot"]},

@@ -719,10 +719,20 @@ class CodexRuntimeBridge:
         runtime_event_callback: Callable[[dict[str, Any]], None] | None = None,
         timeout_sec: int = 600,
         model_override: str = "",
+        request_context: dict[str, Any] | None = None,
     ) -> dict:
         prompt_text = str(prompt or "").strip()
         if not prompt_text:
             return {"success": False, "message": "Prompt rỗng.", "output": ""}
+
+        if request_context:
+            self._emit_event(
+                runtime_event_callback,
+                {
+                    "kind": "codex_handoff",
+                    "request_context": dict(request_context),
+                },
+            )
 
         auth_status = self.env_manager.verify_codex_auth()
         if not auth_status.get("success"):

@@ -3,6 +3,8 @@ import logging
 import os
 import platform
 import shutil
+import subprocess
+import sys
 import tarfile
 import tempfile
 import zipfile
@@ -29,6 +31,8 @@ class SkillManager:
     - Tải và cài đặt skill vào thư mục Codex skills local.
     - Quản lý danh sách skill đã cài.
     """
+
+    DEFAULT_SCRIPT_TIMEOUT_SEC = 60.0
 
     def __init__(self):
         self.api_base_url = self._get_api_base_url()
@@ -157,6 +161,126 @@ class SkillManager:
         except Exception as e:
             logger.warning(f"Cannot persist skill capabilities ({skill_id}): {e}")
 
+    @staticmethod
+    def _safe_tool_function_name(skill_id: str, function_name: str) -> str:
+        skill_part = str(skill_id or "").strip().lower().replace("-", "_")
+        fn_part = str(function_name or "").strip().lower().replace("-", "_")
+        return f"skill__{skill_part}__{fn_part}"
+
+    @staticmethod
+    def _normalize_supported_channels(raw_value) -> list[str]:
+        if not raw_value:
+            return []
+        if isinstance(raw_value, str):
+            raw_value = [raw_value]
+        out = []
+        for item in raw_value:
+            token = str(item or "").strip().lower()
+            if token and token not in out:
+                out.append(token)
+        return out
+
+    def _read_tool_manifest(self, skill_dir: Path) -> dict:
+        manifest_path = skill_dir / "tool_manifest.json"
+        if not manifest_path.is_file():
+            return {}
+        try:
+            payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+            return payload if isinstance(payload, dict) else {}
+        except Exception as e:
+            logger.warning(f"Cannot parse tool_manifest.json in {skill_dir}: {e}")
+            return {}
+
+    def _normalize_skill_tool_function(self, skill_id: str, skill_dir: Path, item: dict) -> tuple[dict | None, str]:
+        if not isinstance(item, dict):
+            return None, "Function entry không phải object."
+
+        function_name = str(item.get("name") or "").strip()
+        description = str(item.get("description") or "").strip()
+        input_schema = item.get("input_schema")
+        execution = item.get("execution") if isinstance(item.get("execution"), dict) else {}
+        execution_type = str((execution or {}).get("type") or "").strip().lower()
+        entrypoint = str((execution or {}).get("entrypoint") or "").strip()
+        if not function_name:
+            return None, "Thiếu function.name."
+        if not description:
+            return None, f"Function '{function_name}' thiếu description."
+        if not isinstance(input_schema, dict):
+            return None, f"Function '{function_name}' thiếu input_schema hợp lệ."
+        if execution_type != "python_script":
+            return None, f"Function '{function_name}' có execution.type chưa hỗ trợ: {execution_type or 'empty'}."
+        if not entrypoint:
+            return None, f"Function '{function_name}' thiếu execution.entrypoint."
+
+        resolved_skill_dir = skill_dir.resolve()
+        resolved_entrypoint = (resolved_skill_dir / entrypoint).resolve()
+        if not self._path_is_within(resolved_skill_dir, resolved_entrypoint) or not resolved_entrypoint.is_file():
+            return None, f"Function '{function_name}' có entrypoint không hợp lệ: {entrypoint}"
+
+        approval_policy = str(item.get("approval_policy") or "on-request").strip().lower()
+        if approval_policy not in {"auto", "on-request"}:
+            approval_policy = "on-request"
+
+        required_capabilities = self._normalize_capabilities(item.get("required_capabilities", []))
+        supported_channels = self._normalize_supported_channels(item.get("supported_channels", []))
+        timeout_seconds = item.get("timeout_seconds")
+        try:
+            timeout_value = float(timeout_seconds) if timeout_seconds not in (None, "") else 0.0
+        except Exception:
+            timeout_value = 0.0
+
+        normalized = {
+            "name": self._safe_tool_function_name(skill_id, function_name),
+            "original_name": function_name,
+            "skill_id": skill_id,
+            "description": f"[Skill {skill_id}] {description}",
+            "input_schema": input_schema,
+            "required_capabilities": required_capabilities,
+            "approval_policy": approval_policy,
+            "supported_channels": supported_channels,
+            "returns_artifacts": bool(item.get("returns_artifacts")),
+            "execution_target": {
+                "kind": "skill_function",
+                "skill_id": skill_id,
+                "function_name": function_name,
+                "entrypoint": str(resolved_entrypoint.relative_to(resolved_skill_dir)),
+                "execution_type": execution_type,
+                "timeout_seconds": timeout_value,
+            },
+        }
+        return normalized, ""
+
+    def get_installed_skill_tool_functions(
+        self,
+        *,
+        supported_channel: str = "",
+        include_invalid: bool = False,
+    ) -> list[dict]:
+        rows = self.get_installed_skills()
+        channel = str(supported_channel or "").strip().lower()
+        out: list[dict] = []
+        for row in rows:
+            skill_id = str((row or {}).get("skill_id") or "").strip()
+            local_path = Path(str((row or {}).get("local_path") or "")).expanduser()
+            if not skill_id or not local_path.is_dir():
+                continue
+
+            manifest = self._read_tool_manifest(local_path)
+            functions = manifest.get("functions") if isinstance(manifest.get("functions"), list) else []
+            for item in functions:
+                normalized, error = self._normalize_skill_tool_function(skill_id, local_path, item)
+                if error:
+                    logger.warning(f"Skip invalid tool function for skill {skill_id}: {error}")
+                    if include_invalid:
+                        out.append({"skill_id": skill_id, "error": error, "raw": item})
+                    continue
+
+                supported_channels = normalized.get("supported_channels") or []
+                if channel and supported_channels and channel not in supported_channels:
+                    continue
+                out.append(normalized)
+        return out
+
     def get_skill_runtime_requirements(self, skill_id: str) -> dict:
         row = db.fetch_one(
             "SELECT capabilities_json FROM skill_capabilities WHERE skill_id = ?",
@@ -181,6 +305,427 @@ class SkillManager:
             "required_capabilities": capabilities,
             "preflight": preflight,
         }
+
+    def _get_required_capabilities_for_skill(self, skill_id: str, local_path: Path | None = None) -> list[str]:
+        row = db.fetch_one(
+            "SELECT capabilities_json FROM skill_capabilities WHERE skill_id = ?",
+            (skill_id,),
+        )
+        if row and row.get("capabilities_json"):
+            try:
+                parsed = json.loads(row.get("capabilities_json") or "[]")
+                if isinstance(parsed, list):
+                    return self._normalize_capabilities(parsed)
+            except Exception:
+                logger.warning(f"Cannot decode skill capabilities for {skill_id}", exc_info=True)
+
+        if local_path:
+            frontmatter = self._parse_skill_frontmatter(local_path / "SKILL.md")
+            capabilities = self._normalize_capabilities(frontmatter.get("required_capabilities", []))
+            if capabilities:
+                self._save_skill_capabilities(skill_id, capabilities)
+            return capabilities
+        return []
+
+    @staticmethod
+    def _windows_hidden_subprocess_kwargs() -> dict:
+        if platform.system() != "Windows":
+            return {}
+        kwargs: dict = {}
+        create_no_window = int(getattr(subprocess, "CREATE_NO_WINDOW", 0) or 0)
+        if create_no_window:
+            kwargs["creationflags"] = create_no_window
+        startupinfo_cls = getattr(subprocess, "STARTUPINFO", None)
+        if startupinfo_cls:
+            startupinfo = startupinfo_cls()
+            startupinfo.dwFlags |= int(getattr(subprocess, "STARTF_USESHOWWINDOW", 0) or 0)
+            startupinfo.wShowWindow = int(getattr(subprocess, "SW_HIDE", 0) or 0)
+            kwargs["startupinfo"] = startupinfo
+        return kwargs
+
+    @staticmethod
+    def _safe_preview(text: str, limit: int = 500) -> str:
+        body = str(text or "").strip()
+        if len(body) <= limit:
+            return body
+        return body[: max(1, limit - 1)].rstrip() + "…"
+
+    @staticmethod
+    def _path_is_within(base_dir: Path, candidate: Path) -> bool:
+        try:
+            candidate.resolve().relative_to(base_dir.resolve())
+            return True
+        except Exception:
+            return False
+
+    def _resolve_python_executable(self) -> str | None:
+        env_candidates = [
+            os.environ.get("OMNIMIND_SKILL_PYTHON", ""),
+            os.environ.get("OMNIMIND_PYTHON", ""),
+        ]
+        for candidate in env_candidates:
+            raw = str(candidate or "").strip()
+            if raw and Path(raw).exists():
+                return raw
+
+        exe = Path(sys.executable or "")
+        if exe.is_file() and exe.name.lower().startswith("python"):
+            return str(exe)
+
+        for cmd_name in ("python3", "python"):
+            resolved = shutil.which(cmd_name)
+            if resolved:
+                return resolved
+        return None
+
+    def _get_installed_skill_row(self, skill_id: str) -> dict | None:
+        return db.fetch_one(
+            "SELECT skill_id, name, version, local_path, installed_at FROM installed_skills WHERE skill_id = ?",
+            (skill_id,),
+        )
+
+    def _get_marketplace_skill_entrypoint(self, skill_id: str) -> str:
+        row = db.fetch_one(
+            "SELECT manifest_json FROM marketplace_skills WHERE id = ?",
+            (skill_id,),
+        )
+        if not row or not row.get("manifest_json"):
+            return ""
+        try:
+            manifest = json.loads(row.get("manifest_json") or "{}")
+        except Exception:
+            return ""
+        if not isinstance(manifest, dict):
+            return ""
+        return str(manifest.get("entrypoint") or "").strip()
+
+    def _resolve_installed_skill_entrypoint(
+        self,
+        skill_id: str,
+        skill_dir: Path,
+        explicit_entrypoint: str = "",
+    ) -> Path:
+        candidates: list[str] = []
+        if explicit_entrypoint:
+            candidates.append(explicit_entrypoint)
+
+        manifest_entrypoint = self._get_marketplace_skill_entrypoint(skill_id)
+        if manifest_entrypoint:
+            candidates.append(manifest_entrypoint)
+
+        skill_md_path = skill_dir / "SKILL.md"
+        if skill_md_path.exists():
+            frontmatter = self._parse_skill_frontmatter(skill_md_path)
+            frontmatter_entrypoint = str(frontmatter.get("entrypoint") or "").strip()
+            if frontmatter_entrypoint:
+                candidates.append(frontmatter_entrypoint)
+
+        scripts_dir = skill_dir / "scripts"
+        if scripts_dir.is_dir():
+            script_files = sorted(
+                path for path in scripts_dir.glob("*.py")
+                if path.is_file() and not path.name.startswith(".")
+            )
+            if len(script_files) == 1:
+                candidates.append(str(script_files[0].relative_to(skill_dir)))
+
+        seen: set[str] = set()
+        for raw in candidates:
+            value = str(raw or "").strip()
+            if not value or value in seen:
+                continue
+            seen.add(value)
+            candidate = (skill_dir / value).resolve()
+            if not self._path_is_within(skill_dir, candidate):
+                continue
+            if candidate.is_file():
+                return candidate
+
+        raise FileNotFoundError(
+            f"Không resolve được entrypoint cho skill '{skill_id}'."
+        )
+
+    @staticmethod
+    def _build_cli_args_from_payload(payload: dict | None) -> list[str]:
+        payload = payload or {}
+        raw_args = payload.get("argv")
+        if raw_args is None:
+            raw_args = payload.get("args")
+        if isinstance(raw_args, list):
+            return [str(item) for item in raw_args if str(item or "").strip()]
+
+        arg_map = payload.get("args")
+        if not isinstance(arg_map, dict):
+            arg_map = payload if isinstance(payload, dict) else {}
+
+        reserved = {"timeout_seconds", "entrypoint", "stdin_json", "env", "argv", "args"}
+        cli_args: list[str] = []
+        for key, value in arg_map.items():
+            if key in reserved:
+                continue
+            if value is None or value is False:
+                continue
+
+            flag = "--" + str(key).strip().replace("_", "-")
+            if value is True:
+                cli_args.append(flag)
+                continue
+            if isinstance(value, list):
+                for item in value:
+                    cli_args.extend([flag, str(item)])
+                continue
+            cli_args.extend([flag, str(value)])
+        return cli_args
+
+    @staticmethod
+    def _redact_cli_args(args: list[str]) -> list[str]:
+        secret_flags = {"--api-secret", "--secret", "--token", "--password"}
+        redacted: list[str] = []
+        hide_next = False
+        for item in args:
+            if hide_next:
+                redacted.append("***")
+                hide_next = False
+                continue
+            token = str(item or "")
+            lowered = token.lower()
+            if lowered in secret_flags:
+                redacted.append(token)
+                hide_next = True
+                continue
+            redacted.append(token)
+        return redacted
+
+    def _run_installed_skill_process(
+        self,
+        skill_id: str,
+        skill_dir: Path,
+        payload: dict | None = None,
+        entrypoint: str = "",
+        timeout_seconds: float | None = None,
+    ) -> dict:
+        payload = payload or {}
+        timeout = float(timeout_seconds or payload.get("timeout_seconds") or self.DEFAULT_SCRIPT_TIMEOUT_SEC)
+        resolved_skill_dir = skill_dir.resolve()
+        script_path = self._resolve_installed_skill_entrypoint(skill_id, resolved_skill_dir, explicit_entrypoint=entrypoint)
+        python_executable = self._resolve_python_executable()
+        if not python_executable:
+            return {
+                "success": False,
+                "code": "PYTHON_NOT_FOUND",
+                "message": "Không tìm thấy Python runtime để chạy skill script.",
+                "skill_id": skill_id,
+                "entrypoint": str(script_path.relative_to(resolved_skill_dir)),
+            }
+
+        cmd = [python_executable, str(script_path)] + self._build_cli_args_from_payload(payload)
+        env = os.environ.copy()
+        env["CODEX_HOME"] = str(self.codex_home)
+        custom_env = payload.get("env")
+        if isinstance(custom_env, dict):
+            for key, value in custom_env.items():
+                if not str(key or "").strip():
+                    continue
+                env[str(key)] = str(value)
+
+        stdin_data = None
+        if isinstance(payload.get("stdin_json"), dict):
+            stdin_data = json.dumps(payload.get("stdin_json"), ensure_ascii=False)
+
+        try:
+            proc = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                input=stdin_data,
+                cwd=str(skill_dir),
+                env=env,
+                timeout=max(1.0, timeout),
+                check=False,
+                **self._windows_hidden_subprocess_kwargs(),
+            )
+        except subprocess.TimeoutExpired:
+            return {
+                "success": False,
+                "code": "SKILL_TIMEOUT",
+                "message": f"Skill '{skill_id}' chạy quá thời gian cho phép ({timeout:.0f}s).",
+                "skill_id": skill_id,
+                "entrypoint": str(script_path.relative_to(resolved_skill_dir)),
+                "timeout_seconds": timeout,
+            }
+        except Exception as e:
+            logger.exception(f"execute installed skill process failed ({skill_id})")
+            return {
+                "success": False,
+                "code": "SKILL_RUN_FAILED",
+                "message": f"Không chạy được skill '{skill_id}': {str(e)[:220]}",
+                "skill_id": skill_id,
+                "entrypoint": str(script_path.relative_to(resolved_skill_dir)),
+            }
+
+        stdout = (proc.stdout or "").strip()
+        stderr = (proc.stderr or "").strip()
+        parsed_json = None
+        if stdout:
+            try:
+                parsed_json = json.loads(stdout)
+            except Exception:
+                parsed_json = None
+
+        success = proc.returncode == 0
+        code = "OK" if success else "SKILL_EXIT_NONZERO"
+        message = self._safe_preview(stdout or stderr or "Skill chạy xong nhưng không trả nội dung.")
+
+        if isinstance(parsed_json, dict):
+            if "success" in parsed_json:
+                success = bool(parsed_json.get("success"))
+            code = str(
+                parsed_json.get("code")
+                or parsed_json.get("error_code")
+                or ("OK" if success else code)
+            ).strip() or ("OK" if success else code)
+            message = str(
+                parsed_json.get("message")
+                or ("Skill chạy thành công." if success else "Skill chạy thất bại.")
+            ).strip() or message
+
+        if proc.returncode != 0 and success:
+            success = False
+            code = "SKILL_EXIT_NONZERO"
+
+        result = {
+            "success": success,
+            "code": code,
+            "message": message,
+            "skill_id": skill_id,
+            "entrypoint": str(script_path.relative_to(resolved_skill_dir)),
+            "command": self._redact_cli_args(cmd),
+            "exit_code": proc.returncode,
+            "stdout_preview": self._safe_preview(stdout),
+            "stderr_preview": self._safe_preview(stderr),
+        }
+        if isinstance(parsed_json, dict):
+            result["data"] = parsed_json
+            if "artifact_path" in parsed_json:
+                result["artifact_path"] = parsed_json.get("artifact_path")
+        elif stdout:
+            result["output"] = stdout
+        return result
+
+    def execute_installed_skill(
+        self,
+        skill_id: str,
+        payload: dict | None = None,
+        entrypoint: str = "",
+        timeout_seconds: float | None = None,
+        auto_request_permissions: bool = False,
+    ) -> dict:
+        skill_id = str(skill_id or "").strip()
+        if not skill_id:
+            return {"success": False, "code": "SKILL_ID_MISSING", "message": "Thiếu skill_id."}
+
+        installed = self._get_installed_skill_row(skill_id)
+        if not installed:
+            return {
+                "success": False,
+                "code": "SKILL_NOT_INSTALLED",
+                "message": f"Skill '{skill_id}' chưa được cài trên máy này.",
+                "skill_id": skill_id,
+            }
+
+        local_path = Path(str(installed.get("local_path") or "")).expanduser()
+        if not local_path.is_dir():
+            return {
+                "success": False,
+                "code": "SKILL_PATH_INVALID",
+                "message": f"Thư mục skill '{skill_id}' không còn tồn tại: {local_path}",
+                "skill_id": skill_id,
+            }
+
+        required_capabilities = self._get_required_capabilities_for_skill(skill_id, local_path=local_path)
+        return self.execute_skill_action(
+            skill_id=skill_id,
+            action_id=f"run_installed_skill:{skill_id}",
+            payload=payload or {},
+            required_capabilities=required_capabilities,
+            runner=lambda run_payload: self._run_installed_skill_process(
+                skill_id=skill_id,
+                skill_dir=local_path,
+                payload=run_payload,
+                entrypoint=entrypoint,
+                timeout_seconds=timeout_seconds,
+            ),
+            auto_request_permissions=auto_request_permissions,
+        )
+
+    def execute_installed_skill_function(
+        self,
+        skill_id: str,
+        function_name: str,
+        arguments: dict | None = None,
+        *,
+        auto_request_permissions: bool = False,
+    ) -> dict:
+        skill_id = str(skill_id or "").strip()
+        function_name = str(function_name or "").strip()
+        if not skill_id:
+            return {"success": False, "code": "SKILL_ID_MISSING", "message": "Thiếu skill_id."}
+        if not function_name:
+            return {"success": False, "code": "FUNCTION_NAME_MISSING", "message": "Thiếu function_name."}
+
+        installed = self._get_installed_skill_row(skill_id)
+        if not installed:
+            return {
+                "success": False,
+                "code": "SKILL_NOT_INSTALLED",
+                "message": f"Skill '{skill_id}' chưa được cài trên máy này.",
+                "skill_id": skill_id,
+            }
+
+        local_path = Path(str(installed.get("local_path") or "")).expanduser()
+        if not local_path.is_dir():
+            return {
+                "success": False,
+                "code": "SKILL_PATH_INVALID",
+                "message": f"Thư mục skill '{skill_id}' không còn tồn tại: {local_path}",
+                "skill_id": skill_id,
+            }
+
+        function_defs = self.get_installed_skill_tool_functions(include_invalid=False)
+        normalized_name = self._safe_tool_function_name(skill_id, function_name)
+        target = None
+        for item in function_defs:
+            if str(item.get("name") or "").strip() == normalized_name:
+                target = item
+                break
+        if not target:
+            return {
+                "success": False,
+                "code": "FUNCTION_NOT_FOUND",
+                "message": f"Skill '{skill_id}' không expose function '{function_name}'.",
+                "skill_id": skill_id,
+                "function_name": function_name,
+            }
+
+        execution_target = target.get("execution_target") if isinstance(target.get("execution_target"), dict) else {}
+        entrypoint = str(execution_target.get("entrypoint") or "").strip()
+        timeout_seconds = float(execution_target.get("timeout_seconds") or 0.0) or None
+        required_capabilities = self._normalize_capabilities(target.get("required_capabilities", []))
+
+        return self.execute_skill_action(
+            skill_id=skill_id,
+            action_id=f"run_skill_function:{function_name}",
+            payload=arguments or {},
+            required_capabilities=required_capabilities,
+            runner=lambda run_payload: self._run_installed_skill_process(
+                skill_id=skill_id,
+                skill_dir=local_path,
+                payload=run_payload,
+                entrypoint=entrypoint,
+                timeout_seconds=timeout_seconds,
+            ),
+            auto_request_permissions=auto_request_permissions,
+        )
 
     def execute_skill_action(
         self,
@@ -626,6 +1171,17 @@ class SkillManager:
                 required_capabilities = self._normalize_capabilities(
                     skill_frontmatter.get("required_capabilities", [])
                 )
+                tool_manifest = self._read_tool_manifest(candidate)
+                tool_functions = tool_manifest.get("functions") if isinstance(tool_manifest.get("functions"), list) else []
+                tool_function_count = 0
+                tool_manifest_warnings: list[str] = []
+                for item in tool_functions:
+                    normalized, error = self._normalize_skill_tool_function(skill_id, candidate, item)
+                    if error:
+                        tool_manifest_warnings.append(error)
+                        continue
+                    if normalized:
+                        tool_function_count += 1
 
                 # 3.1) Cài theo cơ chế staging + backup để tránh mất skill cũ nếu update lỗi.
                 staging_dir = self.skills_dir / f".{skill_id}.tmp"
@@ -688,8 +1244,14 @@ class SkillManager:
                 "skill_id": skill_id,
                 "message": f"Cài skill '{skill_id}' thành công.",
                 "required_capabilities": required_capabilities,
+                "tool_function_count": tool_function_count,
+                "tool_manifest_warnings": tool_manifest_warnings,
                 "permission_preflight": preflight,
             }
+            if tool_function_count:
+                result["message"] += f" Skill này expose {tool_function_count} function cho AI trung tâm."
+            if tool_manifest_warnings:
+                result["message"] += " Một số function trong tool_manifest.json bị bỏ qua do không hợp lệ."
             if not preflight.get("success"):
                 missing = preflight.get("missing_permissions", [])
                 if missing:

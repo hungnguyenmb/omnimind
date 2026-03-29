@@ -117,6 +117,15 @@ class ZaloPromptBuilder:
         prompt_parts.append("Metadata cuộc trò chuyện:\n" + "\n".join(meta_rows))
 
         prompt_parts.append(
+            "Tool runtime có sẵn:\n"
+            "- Nếu cần chạy một installed skill của OmniMind để hoàn thành tác vụ, thêm đúng 1 dòng lệnh máy ở CUỐI câu trả lời:\n"
+            "[[OMNIMIND_RUN_SKILL:skill_id=<skill_id>;payload_json=<json>;auto_request_permissions=true]]\n"
+            "- Có thể thêm entrypoint=<duong_dan_tuong_doi> hoặc timeout_seconds=60 nếu cần.\n"
+            "- Chỉ dùng khi người dùng thực sự muốn thực hiện tác vụ, không dùng cho câu hỏi thuần giải thích.\n"
+            "- Không khẳng định đã lưu/gửi/xử lý xong trước khi phát dòng chỉ thị này và có kết quả runtime thật."
+        )
+
+        prompt_parts.append(
             "Tin nhắn mới nhất từ Zalo cần xử lý:\n"
             + str(bundle_text or "").strip()
         )

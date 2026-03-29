@@ -7,6 +7,10 @@ from database.db_manager import db
 
 logger = logging.getLogger(__name__)
 DEFAULT_API_BASE_URL = "https://license.vinhyenit.com"
+DEFAULT_OPENAPI_PROXY_BASE = "https://openapi.vinhyenit.com/v1"
+DEFAULT_OPENAPI_PROXY_IMAGE_PREDICT_BASE = "https://openapi.vinhyenit.com/v1beta/models"
+DEFAULT_OPENAPI_PROXY_TEXT_MODEL = "gpt-5.4"
+DEFAULT_OPENAPI_PROXY_IMAGE_MODEL = "imagen-4.0-fast-generate-001"
 ENC_PREFIX_V1 = "enc:v1:"
 
 class ConfigManager:
@@ -17,6 +21,7 @@ class ConfigManager:
     SENSITIVE_KEYS = {
         "telegram_token",
         "license_jwt",
+        "openapi_proxy_api_key",
     }
 
     @classmethod
@@ -247,6 +252,239 @@ class ConfigManager:
             normalized = "workspace-write"
         cls.set("codex_sandbox_mode", normalized)
         cls.set("sandbox_mode", normalized)
+
+    @staticmethod
+    def _normalize_url(value: str, default: str) -> str:
+        text = str(value or "").strip()
+        if not text:
+            return default
+        return text.rstrip("/")
+
+    @classmethod
+    def get_openapi_proxy_base(cls) -> str:
+        env_val = os.environ.get("OPENAPI_PROXY_BASE", "").strip()
+        if env_val:
+            return cls._normalize_url(env_val, DEFAULT_OPENAPI_PROXY_BASE)
+        cfg_val = cls.get("openapi_proxy_base", "").strip()
+        if cfg_val:
+            return cls._normalize_url(cfg_val, DEFAULT_OPENAPI_PROXY_BASE)
+        return DEFAULT_OPENAPI_PROXY_BASE
+
+    @classmethod
+    def set_openapi_proxy_base(cls, value: str):
+        cls.set("openapi_proxy_base", cls._normalize_url(value, DEFAULT_OPENAPI_PROXY_BASE))
+
+    @classmethod
+    def get_openapi_proxy_api_key(cls) -> str:
+        env_val = os.environ.get("OPENAPI_PROXY_API_KEY", "").strip()
+        if env_val:
+            return env_val
+        return cls.get("openapi_proxy_api_key", "").strip()
+
+    @classmethod
+    def set_openapi_proxy_api_key(cls, value: str):
+        cls.set("openapi_proxy_api_key", str(value or "").strip())
+
+    @classmethod
+    def get_openapi_proxy_text_model(cls) -> str:
+        env_val = os.environ.get("OPENAPI_PROXY_TEXT_MODEL", "").strip()
+        if env_val:
+            return env_val
+        cfg_val = cls.get("openapi_proxy_text_model", "").strip()
+        return cfg_val or DEFAULT_OPENAPI_PROXY_TEXT_MODEL
+
+    @classmethod
+    def set_openapi_proxy_text_model(cls, value: str):
+        cls.set("openapi_proxy_text_model", str(value or "").strip() or DEFAULT_OPENAPI_PROXY_TEXT_MODEL)
+
+    @classmethod
+    def get_openapi_proxy_image_model(cls) -> str:
+        env_val = os.environ.get("OPENAPI_PROXY_IMAGE_MODEL", "").strip()
+        if env_val:
+            return env_val
+        cfg_val = cls.get("openapi_proxy_image_model", "").strip()
+        return cfg_val or DEFAULT_OPENAPI_PROXY_IMAGE_MODEL
+
+    @classmethod
+    def set_openapi_proxy_image_model(cls, value: str):
+        cls.set("openapi_proxy_image_model", str(value or "").strip() or DEFAULT_OPENAPI_PROXY_IMAGE_MODEL)
+
+    @classmethod
+    def get_openapi_proxy_image_predict_base(cls) -> str:
+        env_val = os.environ.get("OPENAPI_PROXY_IMAGE_PREDICT_BASE", "").strip()
+        if env_val:
+            return cls._normalize_url(env_val, DEFAULT_OPENAPI_PROXY_IMAGE_PREDICT_BASE)
+        cfg_val = cls.get("openapi_proxy_image_predict_base", "").strip()
+        if cfg_val:
+            return cls._normalize_url(cfg_val, DEFAULT_OPENAPI_PROXY_IMAGE_PREDICT_BASE)
+        return DEFAULT_OPENAPI_PROXY_IMAGE_PREDICT_BASE
+
+    @classmethod
+    def set_openapi_proxy_image_predict_base(cls, value: str):
+        cls.set(
+            "openapi_proxy_image_predict_base",
+            cls._normalize_url(value, DEFAULT_OPENAPI_PROXY_IMAGE_PREDICT_BASE),
+        )
+
+    @classmethod
+    def get_openapi_proxy_config(cls) -> dict:
+        return {
+            "base": cls.get_openapi_proxy_base(),
+            "api_key": cls.get_openapi_proxy_api_key(),
+            "text_model": cls.get_openapi_proxy_text_model(),
+            "image_model": cls.get_openapi_proxy_image_model(),
+            "image_predict_base": cls.get_openapi_proxy_image_predict_base(),
+        }
+
+    @classmethod
+    def get_central_ai_mode(cls) -> str:
+        value = cls.get("central_ai_mode", "").strip().lower()
+        if value in {"hybrid", "direct_only", "codex_only"}:
+            return value
+        return "hybrid"
+
+    @classmethod
+    def set_central_ai_mode(cls, value: str):
+        normalized = str(value or "").strip().lower()
+        if normalized not in {"hybrid", "direct_only", "codex_only"}:
+            normalized = "hybrid"
+        cls.set("central_ai_mode", normalized)
+
+    @classmethod
+    def get_central_ai_enabled(cls) -> bool:
+        return cls.get("central_ai_enabled", "True").strip().lower() != "false"
+
+    @classmethod
+    def set_central_ai_enabled(cls, enabled: bool):
+        cls.set("central_ai_enabled", "True" if enabled else "False")
+
+    @classmethod
+    def get_central_ai_direct_model(cls) -> str:
+        value = cls.get("central_ai_direct_model", "").strip()
+        return value or cls.get_openapi_proxy_text_model()
+
+    @classmethod
+    def set_central_ai_direct_model(cls, value: str):
+        cls.set("central_ai_direct_model", str(value or "").strip() or cls.get_openapi_proxy_text_model())
+
+    @classmethod
+    def get_central_ai_fallback_to_codex(cls) -> bool:
+        return cls.get("central_ai_fallback_to_codex", "True").strip().lower() != "false"
+
+    @classmethod
+    def set_central_ai_fallback_to_codex(cls, enabled: bool):
+        cls.set("central_ai_fallback_to_codex", "True" if enabled else "False")
+
+    @classmethod
+    def get_central_ai_config(cls) -> dict:
+        return {
+            "enabled": cls.get_central_ai_enabled(),
+            "mode": cls.get_central_ai_mode(),
+            "direct_model": cls.get_central_ai_direct_model(),
+            "fallback_to_codex": cls.get_central_ai_fallback_to_codex(),
+            "function_read_max_chars": cls.get_central_ai_function_read_max_chars(),
+            "function_shell_timeout_sec": cls.get_central_ai_function_shell_timeout_sec(),
+            "function_shell_max_output_chars": cls.get_central_ai_function_shell_max_output_chars(),
+            "tool_loop_max_steps": cls.get_central_ai_tool_loop_max_steps(),
+            "tool_loop_timeout_sec": cls.get_central_ai_tool_loop_timeout_sec(),
+            "tool_loop_max_calls_per_step": cls.get_central_ai_tool_loop_max_calls_per_step(),
+        }
+
+    @classmethod
+    def get_central_ai_function_read_max_chars(cls) -> int:
+        try:
+            value = int(cls.get("central_ai_function_read_max_chars", "12000").strip() or "12000")
+        except Exception:
+            value = 12000
+        return max(500, min(50000, value))
+
+    @classmethod
+    def set_central_ai_function_read_max_chars(cls, value: int):
+        try:
+            normalized = int(value)
+        except Exception:
+            normalized = 12000
+        cls.set("central_ai_function_read_max_chars", str(max(500, min(50000, normalized))))
+
+    @classmethod
+    def get_central_ai_function_shell_timeout_sec(cls) -> int:
+        try:
+            value = int(cls.get("central_ai_function_shell_timeout_sec", "15").strip() or "15")
+        except Exception:
+            value = 15
+        return max(3, min(60, value))
+
+    @classmethod
+    def set_central_ai_function_shell_timeout_sec(cls, value: int):
+        try:
+            normalized = int(value)
+        except Exception:
+            normalized = 15
+        cls.set("central_ai_function_shell_timeout_sec", str(max(3, min(60, normalized))))
+
+    @classmethod
+    def get_central_ai_function_shell_max_output_chars(cls) -> int:
+        try:
+            value = int(cls.get("central_ai_function_shell_max_output_chars", "4000").strip() or "4000")
+        except Exception:
+            value = 4000
+        return max(500, min(12000, value))
+
+    @classmethod
+    def set_central_ai_function_shell_max_output_chars(cls, value: int):
+        try:
+            normalized = int(value)
+        except Exception:
+            normalized = 4000
+        cls.set("central_ai_function_shell_max_output_chars", str(max(500, min(12000, normalized))))
+
+    @classmethod
+    def get_central_ai_tool_loop_max_steps(cls) -> int:
+        try:
+            value = int(cls.get("central_ai_tool_loop_max_steps", "4").strip() or "4")
+        except Exception:
+            value = 4
+        return max(1, min(8, value))
+
+    @classmethod
+    def set_central_ai_tool_loop_max_steps(cls, value: int):
+        try:
+            normalized = int(value)
+        except Exception:
+            normalized = 4
+        cls.set("central_ai_tool_loop_max_steps", str(max(1, min(8, normalized))))
+
+    @classmethod
+    def get_central_ai_tool_loop_timeout_sec(cls) -> int:
+        try:
+            value = int(cls.get("central_ai_tool_loop_timeout_sec", "45").strip() or "45")
+        except Exception:
+            value = 45
+        return max(5, min(180, value))
+
+    @classmethod
+    def set_central_ai_tool_loop_timeout_sec(cls, value: int):
+        try:
+            normalized = int(value)
+        except Exception:
+            normalized = 45
+        cls.set("central_ai_tool_loop_timeout_sec", str(max(5, min(180, normalized))))
+
+    @classmethod
+    def get_central_ai_tool_loop_max_calls_per_step(cls) -> int:
+        try:
+            value = int(cls.get("central_ai_tool_loop_max_calls_per_step", "3").strip() or "3")
+        except Exception:
+            value = 3
+        return max(1, min(6, value))
+
+    @classmethod
+    def set_central_ai_tool_loop_max_calls_per_step(cls, value: int):
+        try:
+            normalized = int(value)
+        except Exception:
+            normalized = 3
+        cls.set("central_ai_tool_loop_max_calls_per_step", str(max(1, min(6, normalized))))
 
     @classmethod
     def get_zalo_profile_name(cls) -> str:

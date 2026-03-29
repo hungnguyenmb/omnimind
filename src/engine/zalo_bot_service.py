@@ -12,6 +12,7 @@ from pathlib import Path
 from queue import Empty, Queue
 from typing import Optional
 
+from engine.central_ai_coordinator import CentralAiCoordinator
 from engine.codex_runtime_bridge import CodexRuntimeBridge
 from engine.config_manager import ConfigManager
 from engine.openzca_manager import OpenZcaManager
@@ -52,11 +53,16 @@ class ZaloBotService:
         self._manager = OpenZcaManager()
         self._skill_manager = SkillManager()
         self._zalo_memory = ZaloMemoryManager()
+        self._central_ai = CentralAiCoordinator()
         self._codex_bridge = CodexRuntimeBridge()
         self._prompt_builder = ZaloPromptBuilder()
         self._self_user_id = str(ConfigManager.get("zalo_self_user_id", "")).strip()
         self._restart_count = 0
         self._listener_lock = InterProcessFileLock(Path(self._manager.get_app_data_root()) / "zalo_listener_omnimind.lock")
+        self._run_skill_directive_re = re.compile(
+            r"\[\[OMNIMIND_RUN_SKILL:(.*?)\]\]",
+            re.IGNORECASE | re.DOTALL,
+        )
 
     def is_running(self) -> bool:
         th = self._listener_thread
@@ -259,6 +265,15 @@ class ZaloBotService:
         payload = self._parse_raw_line(text)
         if not payload:
             return
+        attachment_candidates = self._extract_attachment_candidates(payload)
+        if attachment_candidates:
+            self._append_jsonl(
+                "zalo_attachment_candidates.jsonl",
+                {
+                    "kind": "attachment_candidate",
+                    "candidates": attachment_candidates[:10],
+                },
+            )
         if str(payload.get("kind") or "").strip().lower() == "lifecycle":
             event_name = str(payload.get("event") or "").strip().lower()
             if event_name == "connected":
@@ -286,6 +301,48 @@ class ZaloBotService:
             return json.loads(body)
         except Exception:
             return None
+
+    def _extract_attachment_candidates(self, node) -> list[dict]:
+        keys_of_interest = {
+            "attachment",
+            "attachments",
+            "image",
+            "images",
+            "photo",
+            "photos",
+            "document",
+            "documents",
+            "file",
+            "files",
+            "url",
+            "thumb",
+            "thumbnail",
+            "media",
+        }
+        out: list[dict] = []
+        queue = [node]
+        while queue:
+            current = queue.pop(0)
+            if isinstance(current, dict):
+                lowered_keys = {str(key).strip().lower() for key in current.keys()}
+                if lowered_keys.intersection(keys_of_interest):
+                    preview = {}
+                    for key, value in list(current.items())[:8]:
+                        if isinstance(value, (str, int, float, bool)):
+                            preview[str(key)] = value
+                        elif isinstance(value, list):
+                            preview[str(key)] = f"list[{len(value)}]"
+                        elif isinstance(value, dict):
+                            preview[str(key)] = "object"
+                    out.append(preview)
+                for value in current.values():
+                    if isinstance(value, (dict, list)):
+                        queue.append(value)
+            elif isinstance(current, list):
+                for value in current:
+                    if isinstance(value, (dict, list)):
+                        queue.append(value)
+        return out
 
     def _consume_loop(self):
         while not self._stop_event.is_set():
@@ -444,28 +501,11 @@ class ZaloBotService:
             self._ensure_thread_bootstrap(base_event)
             bundle_text = self._build_bundle_text(events)
             bundle_size = len(events)
-            zalo_cfg = ConfigManager.get_zalo_bot_config()
-            thread_context = self._zalo_memory.build_thread_context(
-                thread_id=base_event.thread_id,
-                message_limit=32,
-                facts_limit=6,
-                summary_limit=2,
-                char_budget=12000,
-            )
-            prompt, context_meta = self._prompt_builder.build_prompt(
-                thread_context=thread_context,
+            final_text, runtime_notes, context_char_used, route_mode, route_trace = self._generate_reply_for_bundle(
+                base_event=base_event,
                 bundle_text=bundle_text,
                 bundle_size=bundle_size,
-                thread_id=base_event.thread_id,
-                chat_type=base_event.chat_type,
-                zalo_principles=str(zalo_cfg.get("prompt_principles") or "").strip(),
             )
-            result = self._codex_bridge.stream_reply(
-                prompt=prompt,
-                timeout_sec=600,
-                model_override=str(zalo_cfg.get("model") or "").strip(),
-            )
-            final_text = self._sanitize_outbound_text(self._extract_final_text(result)) or "Mình chưa có nội dung phù hợp để gửi."
             self._stop_typing_loop(typing_stop, typing_thread)
             typing_stop = None
             typing_thread = None
@@ -485,7 +525,10 @@ class ZaloBotService:
                     "chat_type": base_event.chat_type,
                     "message_id": base_event.message_id,
                     "bundle_size": bundle_size,
-                    "context_char_used": int(context_meta.get("context_char_used", 0) or 0),
+                    "context_char_used": int(context_char_used or 0),
+                    "runtime_notes": runtime_notes,
+                    "central_ai_mode": route_mode,
+                    "central_ai_trace": route_trace or {},
                 },
                 user_external_id=user_external_id,
                 assistant_external_id=assistant_external_id,
@@ -496,6 +539,8 @@ class ZaloBotService:
                     "thread_id": base_event.thread_id,
                     "chat_type": base_event.chat_type,
                     "bundle_size": bundle_size,
+                    "route_mode": route_mode,
+                    "central_ai_trace": route_trace or {},
                     "reply_preview": final_text[:500],
                     "send_status": send_result,
                 },
@@ -514,6 +559,91 @@ class ZaloBotService:
                 self._thread_workers.pop(thread_id, None)
                 if self._thread_pending.get(thread_id) and thread_id not in self._thread_due_at:
                     self._thread_due_at[thread_id] = time.time() + (ConfigManager.get_zalo_thread_debounce_ms() / 1000.0)
+
+    def _generate_reply_for_bundle(
+        self,
+        *,
+        base_event: ZaloInboundEvent,
+        bundle_text: str,
+        bundle_size: int,
+    ) -> tuple[str, list[str], int, str, dict]:
+        user_external_id = f"zalo:{base_event.thread_id}:{base_event.message_id or base_event.timestamp}:user"
+        central_request = self._central_ai.build_request(
+            channel="zalo",
+            user_text=bundle_text,
+            thread_id=base_event.thread_id,
+            external_id=user_external_id,
+            metadata={
+                "chat_type": base_event.chat_type,
+                "message_id": base_event.message_id,
+                "bundle_size": bundle_size,
+            },
+        )
+        central_route = self._central_ai.decide_route(central_request)
+        central_mode = str((central_route or {}).get("mode") or "").strip().lower()
+        if central_mode in {"reply_direct", "tool_calling", "escalate_to_codex"}:
+            central_result = self._central_ai.handle_request(
+                central_request,
+                persist_turn=False,
+                allow_codex_fallback=False,
+            )
+            if central_result.get("success") and str(central_result.get("reply_text") or "").strip():
+                reply_text = self._sanitize_outbound_text(str(central_result.get("reply_text") or "").strip())
+                if reply_text:
+                    return (
+                        reply_text,
+                        [f"central_ai:{central_mode}:success"],
+                        int(((central_result.get("trace") or {}).get("context_char_used")) or 0),
+                        central_mode,
+                        dict(central_result.get("trace") or {}),
+                    )
+            self._append_jsonl(
+                "zalo_listener_runtime.jsonl",
+                {
+                    "kind": "central_ai_fallback",
+                    "thread_id": base_event.thread_id,
+                    "chat_type": base_event.chat_type,
+                    "mode": central_mode,
+                    "message": str((central_result or {}).get("message") or "").strip(),
+                    "trace": dict((central_result or {}).get("trace") or {}),
+                },
+            )
+
+        zalo_cfg = ConfigManager.get_zalo_bot_config()
+        thread_context = self._zalo_memory.build_thread_context(
+            thread_id=base_event.thread_id,
+            message_limit=32,
+            facts_limit=6,
+            summary_limit=2,
+            char_budget=12000,
+        )
+        prompt, context_meta = self._prompt_builder.build_prompt(
+            thread_context=thread_context,
+            bundle_text=bundle_text,
+            bundle_size=bundle_size,
+            thread_id=base_event.thread_id,
+            chat_type=base_event.chat_type,
+            zalo_principles=str(zalo_cfg.get("prompt_principles") or "").strip(),
+        )
+        result = self._codex_bridge.stream_reply(
+            prompt=prompt,
+            timeout_sec=600,
+            model_override=str(zalo_cfg.get("model") or "").strip(),
+        )
+        raw_final_text = self._extract_final_text(result)
+        cleaned_response, skill_directives = self._extract_runtime_skill_directives(raw_final_text)
+        skill_runtime_result = self._execute_runtime_skill_directives(skill_directives)
+        final_text = self._sanitize_outbound_text(cleaned_response)
+        if not final_text and skill_runtime_result.get("user_messages"):
+            final_text = self._sanitize_outbound_text("\n".join(skill_runtime_result.get("user_messages") or []))
+        final_text = final_text or "Mình chưa có nội dung phù hợp để gửi."
+        return (
+            final_text,
+            list(skill_runtime_result.get("notes") or []),
+            int(context_meta.get("context_char_used", 0) or 0),
+            "legacy_codex",
+            {},
+        )
 
     def _ensure_thread_bootstrap(self, event: ZaloInboundEvent):
         thread = self._zalo_memory.get_thread(event.thread_id)
@@ -581,6 +711,122 @@ class ZaloBotService:
                 typing_thread.join(timeout=0.5)
         except Exception:
             pass
+
+    @staticmethod
+    def _parse_bool_token(value: str, default: bool = False) -> bool:
+        raw = str(value or "").strip().lower()
+        if not raw:
+            return default
+        if raw in {"1", "true", "yes", "y", "on"}:
+            return True
+        if raw in {"0", "false", "no", "n", "off"}:
+            return False
+        return default
+
+    def _extract_runtime_skill_directives(self, text: str) -> tuple[str, list[dict]]:
+        directives: list[dict] = []
+
+        def _replace(match: re.Match) -> str:
+            payload = str(match.group(1) or "").strip()
+            if not payload:
+                return ""
+
+            record = {
+                "skill_id": "",
+                "payload": {},
+                "entrypoint": "",
+                "timeout_seconds": 0.0,
+                "auto_request_permissions": True,
+            }
+
+            for part in [x.strip() for x in payload.split(";") if x.strip()]:
+                if "=" not in part:
+                    if not record["skill_id"]:
+                        record["skill_id"] = part.strip().strip('"').strip("'")
+                    continue
+                key, value = part.split("=", 1)
+                key = key.strip().lower()
+                value = value.strip()
+
+                if key in {"skill_id", "skill"}:
+                    record["skill_id"] = value.strip().strip('"').strip("'")
+                    continue
+                if key in {"entrypoint", "script"}:
+                    record["entrypoint"] = value.strip().strip('"').strip("'")
+                    continue
+                if key in {"auto_request_permissions", "auto_request", "request_permissions"}:
+                    record["auto_request_permissions"] = self._parse_bool_token(value, default=True)
+                    continue
+                if key in {"timeout_seconds", "timeout_sec", "timeout"}:
+                    try:
+                        record["timeout_seconds"] = float(str(value).strip().strip('"').strip("'") or "0")
+                    except Exception:
+                        record["timeout_seconds"] = 0.0
+                    continue
+                if key in {"payload_json", "payload"}:
+                    raw = value.strip().strip('"').strip("'")
+                    if raw:
+                        try:
+                            parsed = json.loads(raw)
+                            if isinstance(parsed, dict):
+                                record["payload"] = parsed
+                        except Exception:
+                            record["payload"] = {}
+                    continue
+
+            skill_id = str(record.get("skill_id") or "").strip()
+            if skill_id:
+                directives.append(record)
+            return ""
+
+        cleaned = self._run_skill_directive_re.sub(_replace, str(text or ""))
+        cleaned = re.sub(r"\n{3,}", "\n\n", cleaned).strip()
+        return cleaned, directives
+
+    def _execute_runtime_skill_directives(self, directives: list[dict]) -> dict:
+        notes: list[str] = []
+        user_messages: list[str] = []
+        if not directives:
+            return {"notes": notes, "user_messages": user_messages}
+
+        for item in directives[:2]:
+            skill_id = str((item or {}).get("skill_id") or "").strip()
+            payload = (item or {}).get("payload") if isinstance((item or {}).get("payload"), dict) else {}
+            entrypoint = str((item or {}).get("entrypoint") or "").strip()
+            timeout_seconds = float((item or {}).get("timeout_seconds") or 0.0)
+            auto_request = bool((item or {}).get("auto_request_permissions", True))
+            if not skill_id:
+                continue
+
+            result = self._skill_manager.execute_installed_skill(
+                skill_id=skill_id,
+                payload=payload,
+                entrypoint=entrypoint,
+                timeout_seconds=timeout_seconds or None,
+                auto_request_permissions=auto_request,
+            )
+
+            if result.get("success"):
+                msg = str(result.get("message") or "Skill chạy thành công.").strip()
+                notes.append(f"{skill_id}: success - {msg}")
+                continue
+
+            code = str(result.get("code") or "").strip()
+            msg = str(result.get("message") or "Skill thất bại.").strip()
+            if code == "PERMISSION_REQUIRED":
+                preflight = result.get("preflight") or {}
+                missing = preflight.get("missing_permissions") or []
+                missing_names = ", ".join(
+                    sorted({str(x.get("permission") or "").strip() for x in missing if str(x.get("permission") or "").strip()})
+                )
+                detail = f" Quyền còn thiếu: {missing_names}." if missing_names else ""
+                user_messages.append(f"Mình chưa thể chạy skill {skill_id} do thiếu quyền hệ thống.{detail} {msg}".strip())
+                notes.append(f"{skill_id}: permission_required - {missing_names or msg}")
+            else:
+                user_messages.append(f"Mình chạy skill {skill_id} chưa thành công. {msg}".strip())
+                notes.append(f"{skill_id}: failed - {msg}")
+
+        return {"notes": notes, "user_messages": user_messages}
 
     @staticmethod
     def _extract_final_text(result: dict) -> str:

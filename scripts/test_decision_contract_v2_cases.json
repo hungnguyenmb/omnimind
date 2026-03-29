@@ -1,0 +1,74 @@
+[
+  {
+    "user_text": "CI/CD là gì?",
+    "expected_mode": "reply_direct",
+    "expected_task_shape": "knowledge",
+    "notes": "Câu hỏi kiến thức thuần ngôn ngữ."
+  },
+  {
+    "user_text": "Đọc file /tmp/test.log giúp tôi",
+    "expected_mode": "tool_calling",
+    "expected_task_shape": "document_analysis",
+    "notes": "Đọc file cụ thể đã có path rõ."
+  },
+  {
+    "user_text": "Bạn đang làm việc trong workspace nào",
+    "expected_mode": "tool_calling",
+    "expected_task_shape": "exploratory_local",
+    "notes": "Case local discovery đơn giản, Sprint 10 nên đi discovery tool trước."
+  },
+  {
+    "user_text": "Hãy tìm các file .md trong repo này",
+    "expected_mode": "tool_calling",
+    "expected_task_shape": "exploratory_local",
+    "notes": "Tìm file theo tên/extension trong repo hiện tại là context discovery một bước."
+  },
+  {
+    "user_text": "Debug lỗi này trong project OmniMind",
+    "expected_mode": "escalate_to_codex",
+    "expected_task_shape": "coding_ops",
+    "notes": "Debug/code workflow nên giao Codex."
+  },
+  {
+    "user_text": "Truy cập web admin và xem đơn hàng mới",
+    "expected_mode": "reply_direct",
+    "expected_task_shape": "browser_ops",
+    "notes": "Hiện chưa có browser integration thật, chỉ trace taxonomy."
+  },
+  {
+    "user_text": "Kiểm tra email mới nhất cho tôi",
+    "expected_mode": "reply_direct",
+    "expected_task_shape": "personal_ops",
+    "notes": "Hiện chưa có email integration thật."
+  },
+  {
+    "user_text": "Tạo file notes.md trong thư mục hiện tại",
+    "expected_mode": "tool_calling",
+    "expected_task_shape": "local_ops",
+    "notes": "Tạo file mới là local op, có thể cần approval ở lớp function."
+  },
+  {
+    "user_text": "Xóa file tạm này đi",
+    "expected_mode": "tool_calling",
+    "expected_task_shape": "high_risk_action",
+    "notes": "Tác vụ có rủi ro cao, cần approval/risk policy."
+  },
+  {
+    "user_text": "Phân tích ảnh đính kèm này giúp tôi",
+    "expected_mode": "tool_calling",
+    "expected_task_shape": "document_analysis",
+    "notes": "Không có attachment thật trong script nên vẫn chỉ kiểm tra taxonomy text-level; runtime thật sẽ dùng attachment-aware path."
+  },
+  {
+    "user_text": "Repo hiện tại là gì",
+    "expected_mode": "tool_calling",
+    "expected_task_shape": "exploratory_local",
+    "notes": "Sprint 10 dùng get_git_repo_info cho case đơn giản này."
+  },
+  {
+    "user_text": "Liệt kê file .md trong docs",
+    "expected_mode": "tool_calling",
+    "expected_task_shape": "exploratory_local",
+    "notes": "Sprint 10 dùng list_local_files cho case discovery read-only đơn giản."
+  }
+]

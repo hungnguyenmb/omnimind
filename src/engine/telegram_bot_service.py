@@ -13,8 +13,11 @@ from typing import Optional
 
 import requests
 
+from engine.artifact_manager import ArtifactManager
+from engine.central_ai_coordinator import CentralAiCoordinator
 from engine.codex_runtime_bridge import CodexRuntimeBridge
 from engine.config_manager import ConfigManager
+from engine.function_executor import FunctionExecutor
 from engine.memory_manager import MemoryManager
 from engine.process_lock import InterProcessFileLock
 from engine.skill_manager import SkillManager
@@ -199,6 +202,9 @@ class TelegramBotService:
         self._lock = threading.RLock()
         self._skill_manager = SkillManager()
         self._memory_mgr = MemoryManager()
+        self._artifact_manager = ArtifactManager()
+        self._central_ai = CentralAiCoordinator()
+        self._function_executor = self._central_ai.function_executor
         self._codex_bridge = CodexRuntimeBridge()
         self._session = requests.Session()
         self._poller_lock = InterProcessFileLock(self._bot_lock_path())
@@ -211,6 +217,10 @@ class TelegramBotService:
         )
         self._run_action_directive_re = re.compile(
             r"\[\[OMNIMIND_RUN_ACTION:(.*?)\]\]",
+            re.IGNORECASE | re.DOTALL,
+        )
+        self._run_skill_directive_re = re.compile(
+            r"\[\[OMNIMIND_RUN_SKILL:(.*?)\]\]",
             re.IGNORECASE | re.DOTALL,
         )
         self._pending_permission_confirmations: dict[str, dict] = {}
@@ -559,6 +569,77 @@ class TelegramBotService:
         self._pending_permission_confirmations[str(chat_id)] = payload
         return payload
 
+    @staticmethod
+    def _build_function_approval_prompt(requests: list[dict]) -> str:
+        lines = []
+        for req in requests[:3]:
+            function_name = str((req or {}).get("function_name") or "unknown_function").strip()
+            missing = str((req or {}).get("missing_names") or "").strip()
+            if missing:
+                lines.append(f"- {function_name}: cần xác nhận cho capability {missing}")
+            else:
+                lines.append(f"- {function_name}: cần xác nhận trước khi chạy thao tác local")
+        detail = "\n".join(lines).strip()
+        return (
+            "🛡️ OmniMind cần anh/chị xác nhận trước khi chạy built-in function local.\n"
+            f"{detail}\n\n"
+            "Trả lời `đồng ý` để chạy tiếp, hoặc `hủy` để bỏ."
+        ).strip()
+
+    @staticmethod
+    def _format_function_result_message(result: dict) -> str:
+        function_name = str((result or {}).get("function_name") or "unknown_function").strip()
+        message = str((result or {}).get("message") or "").strip()
+        code = str((result or {}).get("code") or "").strip()
+        data = (result or {}).get("data") if isinstance((result or {}).get("data"), dict) else {}
+        artifact_path = str((result or {}).get("artifact_path") or "").strip()
+
+        lines = [f"✅ OmniMind đã chạy built-in function `{function_name}` thành công."]
+        if code:
+            lines.append(f"Mã kết quả: {code}")
+        if message:
+            lines.append(message)
+
+        if function_name == "get_system_info" and data:
+            rows = []
+            for key in ["platform", "system", "release", "python_version", "hostname", "cwd", "codex_home"]:
+                value = str(data.get(key) or "").strip()
+                if value:
+                    rows.append(f"- {key}: {value}")
+            if rows:
+                lines.append("Thông tin hệ thống:\n" + "\n".join(rows))
+        elif function_name == "run_shell_command" and data:
+            command = str(data.get("command") or "").strip()
+            cwd = str(data.get("cwd") or "").strip()
+            stdout = str(data.get("stdout") or "").strip()
+            stderr = str(data.get("stderr") or "").strip()
+            if command:
+                lines.append(f"Lệnh: {command}")
+            if cwd:
+                lines.append(f"Thư mục: {cwd}")
+            if stdout:
+                lines.append("Kết quả:\n" + stdout)
+            if stderr:
+                lines.append("Cảnh báo/lỗi:\n" + stderr)
+        elif function_name == "read_local_file" and data:
+            path = str(data.get("path") or "").strip()
+            content = str(data.get("content") or "").strip()
+            if path:
+                lines.append(f"File: {path}")
+            if content:
+                lines.append("Nội dung trích xuất:\n" + content)
+        elif artifact_path:
+            lines.append(f"Đầu ra: {artifact_path}")
+        elif data:
+            try:
+                payload = json.dumps(data, ensure_ascii=False, indent=2)
+            except Exception:
+                payload = str(data)
+            if payload:
+                lines.append(payload)
+
+        return "\n".join([line for line in lines if line]).strip()
+
     def _is_permission_confirmation_expired(self, pending: dict) -> bool:
         created_at = float((pending or {}).get("created_at") or 0.0)
         return (time.time() - created_at) > self.PERMISSION_CONFIRM_TTL_SEC
@@ -614,6 +695,66 @@ class TelegramBotService:
             return ""
 
         cleaned = self._run_action_directive_re.sub(_replace, str(text or ""))
+        cleaned = re.sub(r"\n{3,}", "\n\n", cleaned).strip()
+        return cleaned, directives
+
+    def _extract_runtime_skill_directives(self, text: str) -> tuple[str, list[dict]]:
+        directives: list[dict] = []
+
+        def _replace(match: re.Match) -> str:
+            payload = str(match.group(1) or "").strip()
+            if not payload:
+                return ""
+
+            record = {
+                "skill_id": "",
+                "payload": {},
+                "entrypoint": "",
+                "timeout_seconds": 0.0,
+                "auto_request_permissions": True,
+            }
+
+            for part in [x.strip() for x in payload.split(";") if x.strip()]:
+                if "=" not in part:
+                    if not record["skill_id"]:
+                        record["skill_id"] = part.strip().strip('"').strip("'")
+                    continue
+                key, value = part.split("=", 1)
+                key = key.strip().lower()
+                value = value.strip()
+
+                if key in {"skill_id", "skill"}:
+                    record["skill_id"] = value.strip().strip('"').strip("'")
+                    continue
+                if key in {"entrypoint", "script"}:
+                    record["entrypoint"] = value.strip().strip('"').strip("'")
+                    continue
+                if key in {"auto_request_permissions", "auto_request", "request_permissions"}:
+                    record["auto_request_permissions"] = self._parse_bool_token(value, default=True)
+                    continue
+                if key in {"timeout_seconds", "timeout_sec", "timeout"}:
+                    try:
+                        record["timeout_seconds"] = float(str(value).strip().strip('"').strip("'") or "0")
+                    except Exception:
+                        record["timeout_seconds"] = 0.0
+                    continue
+                if key in {"payload_json", "payload"}:
+                    raw = value.strip().strip('"').strip("'")
+                    if raw:
+                        try:
+                            parsed = json.loads(raw)
+                            if isinstance(parsed, dict):
+                                record["payload"] = parsed
+                        except Exception:
+                            record["payload"] = {}
+                    continue
+
+            skill_id = str(record.get("skill_id") or "").strip()
+            if skill_id:
+                directives.append(record)
+            return ""
+
+        cleaned = self._run_skill_directive_re.sub(_replace, str(text or ""))
         cleaned = re.sub(r"\n{3,}", "\n\n", cleaned).strip()
         return cleaned, directives
 
@@ -732,6 +873,122 @@ class TelegramBotService:
             "permission_confirmation_requests": permission_confirmation_requests,
         }
 
+    def _execute_runtime_skill_directives(
+        self,
+        transport: TelegramStreamTransport,
+        chat_id: str,
+        directives: list[dict],
+    ) -> dict:
+        notes: list[str] = []
+        artifact_paths: list[str] = []
+        permission_confirmation_requests: list[dict] = []
+        if not directives:
+            return {
+                "notes": notes,
+                "artifact_paths": artifact_paths,
+                "permission_confirmation_requests": permission_confirmation_requests,
+            }
+
+        for item in directives[: self.MAX_RUNTIME_ACTION_DIRECTIVES]:
+            skill_id = str((item or {}).get("skill_id") or "").strip()
+            payload = (item or {}).get("payload") if isinstance((item or {}).get("payload"), dict) else {}
+            auto_request = bool((item or {}).get("auto_request_permissions", True))
+            entrypoint = str((item or {}).get("entrypoint") or "").strip()
+            timeout_seconds = float((item or {}).get("timeout_seconds") or 0.0)
+            if not skill_id:
+                continue
+
+            transport.send_text_chunks(chat_id, f"⚙️ OmniMind đang thực thi skill: `{skill_id}`...")
+            result = self._skill_manager.execute_installed_skill(
+                skill_id=skill_id,
+                payload=payload,
+                entrypoint=entrypoint,
+                timeout_seconds=timeout_seconds or None,
+                auto_request_permissions=False,
+            )
+
+            if result.get("success"):
+                msg = str(result.get("message") or "Skill chạy thành công.").strip()
+                code = str(result.get("code") or "").strip()
+                artifact_path = str(result.get("artifact_path") or "").strip()
+                if artifact_path:
+                    artifact_paths.append(artifact_path)
+                    msg = f"{msg}\nĐầu ra: {artifact_path}"
+
+                transport.send_text_chunks(
+                    chat_id,
+                    f"✅ OmniMind đã chạy skill `{skill_id}` thành công."
+                    + (f"\nMã kết quả: {code}" if code else "")
+                    + (f"\n{msg}" if msg else ""),
+                )
+                notes.append(f"{skill_id}: success - {msg}")
+                continue
+
+            code = str(result.get("code") or "").strip()
+            msg = str(result.get("message") or "Skill thất bại.").strip()
+
+            if code == "PERMISSION_REQUIRED":
+                preflight = result.get("preflight") or {}
+                missing = preflight.get("missing_permissions") or []
+                missing_names = ", ".join(
+                    sorted({str(x.get("permission") or "").strip() for x in missing if str(x.get("permission") or "").strip()})
+                )
+                if auto_request:
+                    permission_confirmation_requests.append(
+                        {
+                            "kind": "skill",
+                            "skill_id": skill_id,
+                            "payload": payload,
+                            "entrypoint": entrypoint,
+                            "timeout_seconds": timeout_seconds,
+                            "missing_names": missing_names,
+                            "message": msg,
+                        }
+                    )
+                    notes.append(f"{skill_id}: permission_confirmation_pending - {missing_names or msg}")
+                else:
+                    detail = f"\nQuyền còn thiếu: {missing_names}" if missing_names else ""
+                    transport.send_text_chunks(
+                        chat_id,
+                        f"🛡️ OmniMind chưa thể chạy skill `{skill_id}` do thiếu quyền hệ thống."
+                        f"{detail}\n{msg}",
+                    )
+                    notes.append(f"{skill_id}: permission_required - {missing_names or msg}")
+            else:
+                transport.send_text_chunks(
+                    chat_id,
+                    f"❌ OmniMind chạy skill `{skill_id}` thất bại.\n{msg}",
+                )
+                notes.append(f"{skill_id}: failed - {msg}")
+
+        if permission_confirmation_requests:
+            pending = self._create_permission_confirmation(chat_id=chat_id, requests=permission_confirmation_requests)
+            lines = []
+            for req in permission_confirmation_requests:
+                skill_name = str(req.get("skill_id") or "")
+                missing = str(req.get("missing_names") or "").strip()
+                if missing:
+                    lines.append(f"- {skill_name}: cần quyền {missing}")
+                else:
+                    lines.append(f"- {skill_name}: cần thêm quyền hệ thống")
+            detail = "\n".join(lines).strip()
+            transport.send_text_chunks(
+                chat_id,
+                (
+                    "🛡️ OmniMind cần xin quyền hệ thống trước khi chạy skill.\n"
+                    f"{detail}\n\n"
+                    "Xác nhận 2 bước qua Telegram:\n"
+                    "1) Kiểm tra kỹ tên quyền bên trên\n"
+                    "2) Trả lời `đồng ý` để tiếp tục xin quyền, hoặc `hủy` để từ chối"
+                ),
+            )
+
+        return {
+            "notes": notes,
+            "artifact_paths": artifact_paths,
+            "permission_confirmation_requests": permission_confirmation_requests,
+        }
+
     def _extract_paths_from_recent_messages(self, recent_messages: list[dict], max_messages: int = 8) -> list[str]:
         out: list[str] = []
         seen = set()
@@ -753,8 +1010,84 @@ class TelegramBotService:
     ):
         if not requests:
             return
-        transport.send_text_chunks(chat_id, "Đã nhận xác nhận. OmniMind bắt đầu xin quyền và chạy action...")
+        transport.send_text_chunks(chat_id, "Đã nhận xác nhận. OmniMind bắt đầu xin quyền và chạy thao tác...")
         for req in requests[: self.MAX_RUNTIME_ACTION_DIRECTIVES]:
+            req_kind = str((req or {}).get("kind") or "action").strip().lower()
+            if req_kind == "skill":
+                skill_id = str((req or {}).get("skill_id") or "").strip()
+                payload = (req or {}).get("payload") if isinstance((req or {}).get("payload"), dict) else {}
+                entrypoint = str((req or {}).get("entrypoint") or "").strip()
+                timeout_seconds = float((req or {}).get("timeout_seconds") or 0.0)
+                if not skill_id:
+                    continue
+
+                result = self._skill_manager.execute_installed_skill(
+                    skill_id=skill_id,
+                    payload=payload,
+                    entrypoint=entrypoint,
+                    timeout_seconds=timeout_seconds or None,
+                    auto_request_permissions=True,
+                )
+
+                if result.get("success"):
+                    msg = str(result.get("message") or "Skill chạy thành công.").strip()
+                    artifact_path = str(result.get("artifact_path") or "").strip()
+                    if artifact_path:
+                        msg = f"{msg}\nĐầu ra: {artifact_path}"
+                    transport.send_text_chunks(chat_id, f"✅ OmniMind đã chạy skill `{skill_id}` sau khi xác nhận quyền.\n{msg}")
+                    continue
+
+                code = str(result.get("code") or "").strip()
+                msg = str(result.get("message") or "Skill thất bại.").strip()
+                if code == "PERMISSION_REQUIRED":
+                    preflight = result.get("preflight") or {}
+                    missing = preflight.get("missing_permissions") or []
+                    missing_names = ", ".join(
+                        sorted({str(x.get("permission") or "").strip() for x in missing if str(x.get("permission") or "").strip()})
+                    )
+                    detail = f"\nQuyền còn thiếu: {missing_names}" if missing_names else ""
+                    transport.send_text_chunks(
+                        chat_id,
+                        f"🛡️ Skill `{skill_id}` vẫn chưa chạy được do quyền chưa được cấp đầy đủ."
+                        f"{detail}\n{msg}",
+                    )
+                else:
+                    transport.send_text_chunks(
+                        chat_id,
+                        f"❌ OmniMind chạy skill `{skill_id}` thất bại sau bước xác nhận quyền.\n{msg}",
+                    )
+                continue
+
+            if req_kind == "function":
+                function_name = str((req or {}).get("function_name") or "").strip()
+                arguments = (req or {}).get("arguments") if isinstance((req or {}).get("arguments"), dict) else {}
+                if not function_name:
+                    continue
+
+                result = self._function_executor.execute_function(
+                    function_name=function_name,
+                    arguments=arguments,
+                    auto_approve=True,
+                )
+
+                if result.get("success"):
+                    transport.send_text_chunks(chat_id, self._format_function_result_message(result))
+                    continue
+
+                code = str(result.get("code") or "").strip()
+                msg = str(result.get("message") or "Built-in function thất bại.").strip()
+                if code == "APPROVAL_REQUIRED":
+                    transport.send_text_chunks(
+                        chat_id,
+                        f"🛡️ Built-in function `{function_name}` vẫn chưa chạy được vì còn thiếu bước xác nhận nội bộ.\n{msg}",
+                    )
+                else:
+                    transport.send_text_chunks(
+                        chat_id,
+                        f"❌ OmniMind chạy built-in function `{function_name}` thất bại sau bước xác nhận.\n{msg}",
+                    )
+                continue
+
             skill_id = str((req or {}).get("skill_id") or "omnimind-runtime").strip() or "omnimind-runtime"
             action_id = str((req or {}).get("action_id") or "").strip().lower()
             payload = (req or {}).get("payload") if isinstance((req or {}).get("payload"), dict) else {}
@@ -1192,6 +1525,7 @@ class TelegramBotService:
         document: dict | None,
     ):
         try:
+            attachments: list[dict] = []
             if photos:
                 largest = photos[-1]
                 file_id = str(largest.get("file_id") or "").strip()
@@ -1199,6 +1533,14 @@ class TelegramBotService:
                     raise RuntimeError("Photo không có file_id.")
                 local_path = self._download_telegram_file(token, file_id, "telegram_photo.jpg")
                 prompt_text = (caption or "Hãy phân tích ảnh này.").strip()
+                attachments.append(
+                    self._artifact_manager.normalize_local_artifact(
+                        local_path,
+                        source_channel="telegram",
+                        source_message_id=str(message_id),
+                        metadata={"kind": "photo", "caption": caption},
+                    )
+                )
             else:
                 file_id = str((document or {}).get("file_id") or "").strip()
                 if not file_id:
@@ -1206,6 +1548,19 @@ class TelegramBotService:
                 file_name = str((document or {}).get("file_name") or "telegram_document.bin")
                 local_path = self._download_telegram_file(token, file_id, file_name)
                 prompt_text = (caption or "Hãy phân tích file đính kèm này.").strip()
+                attachments.append(
+                    self._artifact_manager.normalize_local_artifact(
+                        local_path,
+                        source_channel="telegram",
+                        source_message_id=str(message_id),
+                        metadata={"kind": "document", "caption": caption, "file_name": file_name},
+                    )
+                )
+
+            invalid = [item for item in attachments if not item.get("is_valid")]
+            if invalid and not any(item.get("is_valid") for item in attachments):
+                user_hint = str((invalid[0] or {}).get("user_hint") or "").strip()
+                raise RuntimeError(user_hint or str((invalid[0] or {}).get("message") or "Attachment không hợp lệ."))
 
             merged_user_text = (
                 f"{prompt_text}\n\n"
@@ -1218,6 +1573,7 @@ class TelegramBotService:
                 update_id=update_id,
                 message_id=message_id,
                 user_text=merged_user_text,
+                attachments=attachments,
             )
         except Exception as e:
             logger.exception("Handle file message failed")
@@ -1278,7 +1634,8 @@ class TelegramBotService:
         prompt_parts.append(
             "Tool mặc định luôn có sẵn:\n"
             "1) SEND_DOCUMENT_TO_TELEGRAM\n"
-            "2) RUN_BUILTIN_ACTION\n\n"
+            "2) RUN_BUILTIN_ACTION\n"
+            "3) RUN_INSTALLED_SKILL\n\n"
             "A. Gửi file Telegram:\n"
             "Chỉ dùng khi người dùng yêu cầu gửi file/tài liệu.\n"
             "Nếu user yêu cầu gửi file mà thiếu chỉ thị tool thì coi như task CHƯA hoàn thành.\n"
@@ -1293,7 +1650,13 @@ class TelegramBotService:
             "[[OMNIMIND_RUN_ACTION:action_id=<action_id>;payload_json=<json>;auto_request_permissions=true]]\n"
             "Ví dụ payload_json: {\"text\":\"xin chào\"} hoặc {\"confirm\":true,\"dry_run\":true}.\n"
             "Nếu action cần quyền hệ thống, OmniMind sẽ yêu cầu user xác nhận 2 bước qua Telegram trước khi xin quyền.\n"
-            "Không tự ý chạy action nguy hiểm nếu người dùng chưa xác nhận rõ."
+            "Không tự ý chạy action nguy hiểm nếu người dùng chưa xác nhận rõ.\n\n"
+            "C. Chạy installed skill:\n"
+            "Dùng khi đã có skill marketplace/tool skill phù hợp được cài trong OmniMind.\n"
+            "Khi cần chạy skill, thêm đúng 1 dòng lệnh máy ở CUỐI câu trả lời:\n"
+            "[[OMNIMIND_RUN_SKILL:skill_id=<skill_id>;payload_json=<json>;auto_request_permissions=true]]\n"
+            "Có thể thêm entrypoint=<duong_dan_tuong_doi> hoặc timeout_seconds=60 nếu cần.\n"
+            "Không nói đã hoàn thành lưu/gửi/xử lý trước khi phát dòng chỉ thị này và nhận được kết quả runtime thật."
         )
         prompt_parts.append(f"Tên hiển thị người dùng: {display_name}")
         prompt_parts.append(f"Yêu cầu hiện tại từ Telegram:\n{user_text}")
@@ -1546,6 +1909,7 @@ class TelegramBotService:
         update_id: int,
         message_id: int,
         user_text: str,
+        attachments: list[dict] | None = None,
     ):
         user_external_id = f"tg:{update_id}:user"
         assistant_external_id = f"tg:{update_id}:assistant"
@@ -1558,6 +1922,75 @@ class TelegramBotService:
             ):
                 return
 
+            central_ai_request = self._central_ai.build_request(
+                channel="telegram",
+                user_text=user_text,
+                thread_id=str(chat_id),
+                external_id=user_external_id,
+                attachments=list(attachments or []),
+                metadata={
+                    "telegram_chat_id": str(chat_id),
+                    "telegram_update_id": update_id,
+                    "telegram_message_id": message_id,
+                },
+            )
+            central_ai_route = self._central_ai.decide_route(central_ai_request)
+            central_ai_mode = str((central_ai_route or {}).get("mode") or "").strip().lower()
+            if central_ai_mode in {"reply_direct", "tool_calling", "escalate_to_codex"}:
+                draft_id = None
+                try:
+                    draft_id = transport.send_message(chat_id, "🤔 OmniMind đang xử lý...")
+                except Exception as draft_err:
+                    logger.warning(f"Không gửi được direct AI draft message Telegram: {draft_err}")
+
+                central_result = self._central_ai.handle_request(
+                    central_ai_request,
+                    persist_turn=False,
+                    allow_codex_fallback=False,
+                )
+                if central_result.get("success") and str(central_result.get("reply_text") or "").strip():
+                    response = str(central_result.get("reply_text") or "").strip()
+                    approval_requests = list(central_result.get("approval_requests") or [])
+                    self._finalize_assistant_message(
+                        transport=transport,
+                        chat_id=chat_id,
+                        draft_id=draft_id,
+                        final_text=response,
+                    )
+                    if approval_requests:
+                        self._create_permission_confirmation(chat_id=chat_id, requests=approval_requests)
+                        transport.send_text_chunks(
+                            chat_id,
+                            self._build_function_approval_prompt(approval_requests),
+                        )
+                    self._skill_manager.record_runtime_interaction(
+                        user_text=user_text,
+                        assistant_text=response,
+                        source="telegram",
+                        metadata={
+                            "telegram_update_id": update_id,
+                            "telegram_message_id": message_id,
+                            "central_ai_trace": central_result.get("trace") or {},
+                            "central_ai_mode": central_ai_mode,
+                            "attachment_count": len(attachments or []),
+                            "pending_function_approval_count": len(approval_requests),
+                        },
+                        user_external_id=user_external_id,
+                        assistant_external_id=assistant_external_id,
+                    )
+                    return
+
+                if draft_id:
+                    try:
+                        transport.delete_message(chat_id, draft_id)
+                    except Exception:
+                        pass
+                logger.warning(
+                    "Central AI path failed on Telegram; fallback to legacy Codex flow. mode=%s reason=%s",
+                    central_ai_mode,
+                    str(central_result.get("message") or "").strip(),
+                )
+
             prompt, context = self._build_codex_prompt(user_text)
             raw_response, draft_id = self._stream_codex_response(
                 transport,
@@ -1569,30 +2002,43 @@ class TelegramBotService:
                 },
             )
             cleaned_response, send_directives = self._extract_send_document_directives(raw_response)
+            cleaned_response, skill_directives = self._extract_runtime_skill_directives(cleaned_response)
             response, action_directives = self._extract_runtime_action_directives(cleaned_response)
-            response = response or "OmniMind không trả nội dung."
-
-            self._finalize_assistant_message(
-                transport=transport,
-                chat_id=chat_id,
-                draft_id=draft_id,
-                final_text=response,
-            )
+            response = str(response or "").strip()
 
             action_runtime_result = self._execute_runtime_action_directives(
                 transport=transport,
                 chat_id=chat_id,
                 directives=action_directives,
             )
+            skill_runtime_result = self._execute_runtime_skill_directives(
+                transport=transport,
+                chat_id=chat_id,
+                directives=skill_directives,
+            )
+            if response:
+                self._finalize_assistant_message(
+                    transport=transport,
+                    chat_id=chat_id,
+                    draft_id=draft_id,
+                    final_text=response,
+                )
+            elif draft_id:
+                try:
+                    transport.delete_message(chat_id, draft_id)
+                except Exception:
+                    pass
             action_notes = action_runtime_result.get("notes") or []
-            runtime_artifact_paths = action_runtime_result.get("artifact_paths") or []
+            skill_notes = skill_runtime_result.get("notes") or []
+            runtime_artifact_paths = (action_runtime_result.get("artifact_paths") or []) + (skill_runtime_result.get("artifact_paths") or [])
 
-            assistant_memory_text = response
-            if action_notes:
+            assistant_memory_text = response or "Đã xử lý qua runtime directive."
+            runtime_notes = action_notes + skill_notes
+            if runtime_notes:
                 assistant_memory_text = (
-                    response
+                    (response or "Đã xử lý qua runtime directive.")
                     + "\n\n[Runtime action logs]\n"
-                    + "\n".join([f"- {x}" for x in action_notes[:8]])
+                    + "\n".join([f"- {x}" for x in runtime_notes[:8]])
                 )
 
             self._skill_manager.record_runtime_interaction(

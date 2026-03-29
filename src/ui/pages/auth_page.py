@@ -11,6 +11,7 @@ from PyQt5.QtWidgets import (
 from PyQt5.QtCore import Qt, QSize, QThread, pyqtSignal, QTimer
 from PyQt5.QtGui import QColor
 from ui.icons import Icons
+from engine.ai_gateway_client import AiGatewayClient
 from engine.config_manager import ConfigManager
 from engine.environment_manager import EnvironmentManager
 from engine.openzca_manager import OpenZcaManager
@@ -261,6 +262,22 @@ class ZaloGroupListWorker(QThread):
         self.finished.emit(result)
 
 
+class OpenApiGatewayProbeWorker(QThread):
+    finished = pyqtSignal(dict)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+
+    def run(self):
+        try:
+            client = AiGatewayClient()
+            result = client.probe_gateway()
+        except Exception as e:
+            logger.exception("OpenAPI gateway probe failed")
+            result = {"success": False, "message": f"Lỗi probe OpenAPI Gateway: {str(e)[:120]}"}
+        self.finished.emit(result)
+
+
 class AuthPage(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -272,6 +289,7 @@ class AuthPage(QWidget):
         self._zalo_status_worker = None
         self._zalo_bot_worker = None
         self._zalo_group_worker = None
+        self._openapi_probe_worker = None
         self._pending_openzca_auth_op = ""
         self._pending_zalo_bot_op = ""
         self._last_zalo_auto_refresh_ts = 0.0
@@ -395,6 +413,83 @@ class AuthPage(QWidget):
         ws_layout.addLayout(ws_row)
 
         layout.addWidget(ws_card)
+
+        # ── OpenAPI Gateway Card ──
+        openapi_card = self._create_card("🧩  OpenAPI Gateway")
+        openapi_layout = openapi_card.layout()
+
+        openapi_layout.addWidget(self._create_field_label("Base URL cho AI trung tâm"))
+        self.openapi_base_input = QLineEdit()
+        self.openapi_base_input.setObjectName("FormInput")
+        self.openapi_base_input.setPlaceholderText("https://openapi.vinhyenit.com/v1")
+        self.openapi_base_input.setFixedHeight(44)
+        openapi_layout.addWidget(self.openapi_base_input)
+
+        openapi_layout.addSpacing(4)
+        openapi_layout.addWidget(self._create_field_label("API Key"))
+        self.openapi_api_key_input = QLineEdit()
+        self.openapi_api_key_input.setObjectName("FormInput")
+        self.openapi_api_key_input.setPlaceholderText("sk-...")
+        self.openapi_api_key_input.setEchoMode(QLineEdit.Password)
+        self.openapi_api_key_input.setFixedHeight(44)
+        openapi_layout.addWidget(self.openapi_api_key_input)
+
+        openapi_layout.addSpacing(4)
+        openapi_layout.addWidget(self._create_field_label("Model text/vision"))
+        self.openapi_text_model_input = QLineEdit()
+        self.openapi_text_model_input.setObjectName("FormInput")
+        self.openapi_text_model_input.setPlaceholderText("gpt-5.4")
+        self.openapi_text_model_input.setFixedHeight(44)
+        openapi_layout.addWidget(self.openapi_text_model_input)
+
+        openapi_layout.addSpacing(4)
+        openapi_layout.addWidget(self._create_field_label("Model image generation"))
+        self.openapi_image_model_input = QLineEdit()
+        self.openapi_image_model_input.setObjectName("FormInput")
+        self.openapi_image_model_input.setPlaceholderText("imagen-4.0-fast-generate-001")
+        self.openapi_image_model_input.setFixedHeight(44)
+        openapi_layout.addWidget(self.openapi_image_model_input)
+
+        openapi_layout.addSpacing(4)
+        openapi_layout.addWidget(self._create_field_label("Base URL image predict"))
+        self.openapi_image_predict_base_input = QLineEdit()
+        self.openapi_image_predict_base_input.setObjectName("FormInput")
+        self.openapi_image_predict_base_input.setPlaceholderText("https://openapi.vinhyenit.com/v1beta/models")
+        self.openapi_image_predict_base_input.setFixedHeight(44)
+        openapi_layout.addWidget(self.openapi_image_predict_base_input)
+
+        openapi_status_row = QHBoxLayout()
+        self.openapi_status_icon = QLabel("⚪")
+        self.openapi_status_icon.setFixedWidth(20)
+        self.openapi_status_icon.setStyleSheet("font-size: 14px; background: transparent;")
+        openapi_status_row.addWidget(self.openapi_status_icon)
+        self.openapi_status_label = QLabel("Chưa kiểm tra OpenAPI Gateway.")
+        self.openapi_status_label.setStyleSheet("font-size: 14px; font-weight: 600; color: #94A3B8;")
+        self.openapi_status_label.setWordWrap(True)
+        openapi_status_row.addWidget(self.openapi_status_label)
+        openapi_status_row.addStretch()
+
+        self.openapi_probe_btn = QPushButton("  Kiểm tra Gateway")
+        self.openapi_probe_btn.setObjectName("SecondaryBtn")
+        self.openapi_probe_btn.setIcon(Icons.refresh("#3B82F6", 16))
+        self.openapi_probe_btn.setCursor(Qt.PointingHandCursor)
+        self.openapi_probe_btn.setFixedHeight(40)
+        self.openapi_probe_btn.clicked.connect(self._probe_openapi_gateway)
+        openapi_status_row.addWidget(self.openapi_probe_btn)
+        openapi_layout.addLayout(openapi_status_row)
+
+        self.openapi_hint_label = QLabel("Dùng để test `/models`, text chat và probe sơ bộ function calling qua OpenAPI Gateway.")
+        self.openapi_hint_label.setStyleSheet("font-size: 12px; color: #64748B;")
+        self.openapi_hint_label.setWordWrap(True)
+        openapi_layout.addWidget(self.openapi_hint_label)
+
+        self.openapi_probe_detail = QLabel("")
+        self.openapi_probe_detail.setStyleSheet("font-size: 12px; color: #334155;")
+        self.openapi_probe_detail.setWordWrap(True)
+        self.openapi_probe_detail.setVisible(False)
+        openapi_layout.addWidget(self.openapi_probe_detail)
+
+        layout.addWidget(openapi_card)
 
         # ── Zalo Connection Card ──
         zalo_card = self._create_card("💬  Kết nối Zalo")
@@ -1017,6 +1112,23 @@ class AuthPage(QWidget):
             self.zalo_runtime_progress.setRange(0, 100)
             self.zalo_runtime_progress.setValue(0)
             self.zalo_runtime_progress_text.setText("")
+
+    def _set_openapi_probe_running(self, running: bool, text: str = ""):
+        self.openapi_probe_btn.setEnabled(not running)
+        if running:
+            self.openapi_status_icon.setText("🟡")
+            self.openapi_status_label.setText(text or "Đang kiểm tra OpenAPI Gateway...")
+            self.openapi_status_label.setStyleSheet("font-size: 14px; font-weight: 600; color: #3B82F6;")
+            self.openapi_probe_detail.setVisible(False)
+
+    @staticmethod
+    def _mask_secret_preview(value: str) -> str:
+        text = str(value or "").strip()
+        if not text:
+            return ""
+        if len(text) <= 8:
+            return "*" * len(text)
+        return f"{text[:4]}***{text[-4:]}"
 
     def _set_openzca_actions_enabled(self, enabled: bool):
         self.zalo_check_btn.setEnabled(enabled)
@@ -1738,6 +1850,7 @@ class AuthPage(QWidget):
         token = ConfigManager.get("telegram_token", "")
         chat_id = ConfigManager.get("telegram_chat_id", "")
         workspace = ConfigManager.get("workspace_path", "")
+        openapi_cfg = ConfigManager.get_openapi_proxy_config()
         zalo_cfg = ConfigManager.get_zalo_bot_config()
         
         # Load Checkboxes
@@ -1758,6 +1871,11 @@ class AuthPage(QWidget):
         self.token_input.setText(token)
         self.user_id_input.setText(chat_id)
         self.workspace_input.setText(workspace)
+        self.openapi_base_input.setText(str(openapi_cfg.get("base") or ""))
+        self.openapi_api_key_input.setText(str(openapi_cfg.get("api_key") or ""))
+        self.openapi_text_model_input.setText(str(openapi_cfg.get("text_model") or ""))
+        self.openapi_image_model_input.setText(str(openapi_cfg.get("image_model") or ""))
+        self.openapi_image_predict_base_input.setText(str(openapi_cfg.get("image_predict_base") or ""))
         self.zalo_auto_reply_check.setChecked(bool(zalo_cfg.get("auto_reply", True)))
         self._set_codex_combo_value(self.zalo_model_combo, str(zalo_cfg.get("model") or "gpt-5-codex-mini"))
         scope = str(zalo_cfg.get("group_scope") or "all")
@@ -1786,6 +1904,12 @@ class AuthPage(QWidget):
         ConfigManager.set("perm_accessibility", str(self.perm_accessibility.isChecked()))
         ConfigManager.set("perm_screenshot", str(self.perm_screenshot.isChecked()))
         ConfigManager.set("perm_camera", str(self.perm_camera.isChecked()))
+        if openapi_cfg.get("api_key"):
+            self.openapi_status_icon.setText("⚪")
+            self.openapi_status_label.setText(
+                f"Đã nạp cấu hình Gateway · key {self._mask_secret_preview(str(openapi_cfg.get('api_key') or ''))}"
+            )
+            self.openapi_status_label.setStyleSheet("font-size: 14px; font-weight: 600; color: #64748B;")
         self._sync_zalo_bot_status_display()
         self._sync_zalo_button_states()
 
@@ -1794,6 +1918,11 @@ class AuthPage(QWidget):
         token = self.token_input.text().strip()
         chat_id = self.user_id_input.text().strip()
         workspace = self.workspace_input.text().strip()
+        openapi_base = self.openapi_base_input.text().strip()
+        openapi_api_key = self.openapi_api_key_input.text().strip()
+        openapi_text_model = self.openapi_text_model_input.text().strip()
+        openapi_image_model = self.openapi_image_model_input.text().strip()
+        openapi_image_predict_base = self.openapi_image_predict_base_input.text().strip()
         zalo_group_scope = self.zalo_group_scope_combo.currentData() or "all"
         zalo_allowlist = self._collect_selected_zalo_group_ids()
         zalo_prompt = self.zalo_prompt_input.toPlainText().strip()
@@ -1811,6 +1940,11 @@ class AuthPage(QWidget):
         ConfigManager.set("telegram_token", token)
         ConfigManager.set("telegram_chat_id", chat_id)
         ConfigManager.set("workspace_path", workspace)
+        ConfigManager.set_openapi_proxy_base(openapi_base)
+        ConfigManager.set_openapi_proxy_api_key(openapi_api_key)
+        ConfigManager.set_openapi_proxy_text_model(openapi_text_model)
+        ConfigManager.set_openapi_proxy_image_model(openapi_image_model)
+        ConfigManager.set_openapi_proxy_image_predict_base(openapi_image_predict_base)
         ConfigManager.set_codex_model(model)
         ConfigManager.set_sandbox_mode(sandbox_mode)
         ConfigManager.set_codex_approval_policy(approval_policy)
@@ -1852,12 +1986,72 @@ class AuthPage(QWidget):
         self._toggle_auto_start(self.auto_start_check.isChecked())
 
         logger.info("Settings saved successfully.")
+        if openapi_api_key:
+            self.openapi_status_icon.setText("⚪")
+            self.openapi_status_label.setText(
+                f"Đã lưu cấu hình Gateway · key {self._mask_secret_preview(openapi_api_key)}"
+            )
+            self.openapi_status_label.setStyleSheet("font-size: 14px; font-weight: 600; color: #64748B;")
+        else:
+            self.openapi_status_icon.setText("⚪")
+            self.openapi_status_label.setText("Đã lưu cấu hình Gateway nhưng chưa có API key.")
+            self.openapi_status_label.setStyleSheet("font-size: 14px; font-weight: 600; color: #94A3B8;")
+        self.openapi_probe_detail.setVisible(False)
 
         # Hiệu ứng lưu thành công trên nút
         self.save_btn.setText("  Đã Lưu ✅")
         self.save_btn.setEnabled(False)
         from PyQt5.QtCore import QTimer
         QTimer.singleShot(2000, self._reset_save_btn)
+
+    def _probe_openapi_gateway(self):
+        if self._openapi_probe_worker and self._openapi_probe_worker.isRunning():
+            return
+        if not self.openapi_api_key_input.text().strip():
+            QMessageBox.warning(self, "OpenAPI Gateway", "Vui lòng nhập API key trước khi kiểm tra.")
+            return
+        self._set_openapi_probe_running(True, "Đang kiểm tra OpenAPI Gateway...")
+        self.openapi_hint_label.setText("Đang gọi `/models`, text chat và probe sơ bộ function calling...")
+        self._openapi_probe_worker = OpenApiGatewayProbeWorker(self)
+        self._openapi_probe_worker.finished.connect(self._on_openapi_probe_finished)
+        self._openapi_probe_worker.start()
+
+    def _on_openapi_probe_finished(self, result: dict):
+        self._openapi_probe_worker = None
+        self.openapi_probe_btn.setEnabled(True)
+        detail = result.get("details") if isinstance(result.get("details"), dict) else {}
+        models_detail = detail.get("models") if isinstance(detail.get("models"), dict) else {}
+        text_detail = detail.get("text") if isinstance(detail.get("text"), dict) else {}
+        tools_detail = detail.get("tools") if isinstance(detail.get("tools"), dict) else {}
+        detail_lines = [
+            f"/models: {'OK' if result.get('models_ok') else 'FAIL'}",
+            f"text chat: {'OK' if result.get('text_ok') else 'FAIL'}",
+            (
+                "tool probe: SUPPORTED"
+                if result.get("supports_tools")
+                else ("tool probe: ACCEPTED nhưng chưa thấy tool_calls" if result.get("tools_ok") else "tool probe: FAIL")
+            ),
+        ]
+        if text_detail.get("text"):
+            detail_lines.append(f"Text mẫu: {str(text_detail.get('text'))[:120]}")
+        if tools_detail.get("message"):
+            detail_lines.append(f"Tool probe note: {str(tools_detail.get('message'))[:160]}")
+        self.openapi_probe_detail.setText("\n".join(detail_lines))
+        self.openapi_probe_detail.setVisible(True)
+
+        if result.get("success") and result.get("supports_tools"):
+            self.openapi_status_icon.setText("🟢")
+            self.openapi_status_label.setText("Gateway hoạt động tốt và đã trả về tool_calls.")
+            self.openapi_status_label.setStyleSheet("font-size: 14px; font-weight: 600; color: #10B981;")
+        elif result.get("success"):
+            self.openapi_status_icon.setText("🟡")
+            self.openapi_status_label.setText("Gateway hoạt động với text nhưng tool calling chưa được xác nhận.")
+            self.openapi_status_label.setStyleSheet("font-size: 14px; font-weight: 600; color: #F59E0B;")
+        else:
+            self.openapi_status_icon.setText("🔴")
+            self.openapi_status_label.setText(result.get("message", "Kiểm tra OpenAPI Gateway thất bại."))
+            self.openapi_status_label.setStyleSheet("font-size: 14px; font-weight: 600; color: #EF4444;")
+        self.openapi_hint_label.setText(result.get("message", ""))
 
     def _reset_save_btn(self):
         """Reset nút Save về trạng thái ban đầu."""
