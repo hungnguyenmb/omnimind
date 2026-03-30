@@ -44,10 +44,14 @@ class CentralAiCoordinator:
     ]
     CODING_PATTERNS = [
         re.compile(r"\b(code|viết code|sửa code|debug|bug|fix bug|chạy test|unit test|integration test|build|compile|refactor|source code|api mới)\b", re.IGNORECASE),
+        re.compile(
+            r"(?:(?:\b(kiểm tra|kiem tra|điều tra|dieu tra|phân tích|phan tich|xem log)\b.{0,40}\b(lỗi|loi|bug|issue|vấn đề|van de)\b)|(?:\b(lỗi|loi|bug|issue|vấn đề|van de)\b.{0,40}\b(kiểm tra|kiem tra|điều tra|dieu tra|phân tích|phan tich|xem log)\b))",
+            re.IGNORECASE,
+        ),
     ]
     EXPLORATORY_LOCAL_PATTERNS = [
         re.compile(
-            r"\b(workspace nào|workspace này|repo này|repo hiện tại|repo hien tai|trong repo|trong project|cấu trúc thư mục|co gi|có gì|liệt kê file|liet ke file|list file|tìm file|tìm các file|tim file|tim cac file|search file|search files|grep|rg|find)\b",
+            r"\b(workspace nào|workspace này|repo này|repo hiện tại|repo hien tai|trong repo|trong project|cấu trúc thư mục|co gi|có gì|liệt kê file|liet ke file|list file|tìm file|tìm các file|tìm tất cả file|tim file|tim cac file|tim tat ca file|search file|search files|grep|rg|find|chỗ dùng|cho dung|all usages|find usages|tham chiếu|tham chieu|references?)\b",
             re.IGNORECASE,
         ),
     ]
@@ -180,6 +184,18 @@ class CentralAiCoordinator:
         return not self._looks_like_local_execution_request(body)
 
     @staticmethod
+    def _extract_named_file_candidate(text: str) -> str:
+        body = str(text or "").strip()
+        if not body:
+            return ""
+        for candidate in re.findall(r"\b[\w.\-]+\.[A-Za-z0-9]{1,12}\b", body):
+            low = candidate.lower()
+            if low.startswith(("http.", "https.", "www.")):
+                continue
+            return candidate
+        return ""
+
+    @staticmethod
     def _matches_any(patterns: list[re.Pattern], text: str) -> bool:
         body = str(text or "").strip()
         if not body:
@@ -225,7 +241,7 @@ class CentralAiCoordinator:
         if task_shape == "personal_ops" and re.search(r"\b(email|mail)\b", user_text, re.IGNORECASE):
             if not re.search(r"\b(gmail|outlook|inbox|hộp thư|hop thu)\b", user_text, re.IGNORECASE):
                 missing.append("account")
-        if task_shape == "local_ops" and re.search(r"\b(đọc file|doc file|mở file|mo file)\b", user_text, re.IGNORECASE):
+        if task_shape in {"local_ops", "document_analysis"} and re.search(r"\b(đọc file|doc file|mở file|mo file)\b", user_text, re.IGNORECASE):
             if not re.search(r"(?:^|\s)(?:~/|/[\w.\-~/]+|[A-Za-z]:\\[^\s]+)", user_text):
                 missing.append("path")
         return missing
@@ -249,12 +265,62 @@ class CentralAiCoordinator:
         if "system info" in user_text.lower() or "hệ thống" in user_text.lower():
             return "get_system_info"
         if re.search(r"\b(đọc file|doc file|mở file|mo file)\b", user_text, re.IGNORECASE):
+            if not re.search(r"(?:^|\s)(?:~/|/[\w.\-~/]+|[A-Za-z]:\\[^\s]+)", user_text):
+                file_candidate = self._extract_named_file_candidate(user_text)
+                if file_candidate:
+                    return "search_files_by_name"
             return "read_local_file"
         if re.search(r"\b(list file|liệt kê file|liet ke file|tìm file|tim file|rg|find)\b", user_text, re.IGNORECASE):
             return "run_shell_command"
         if task_shape == "document_analysis":
             return "read_local_file"
         return ""
+
+    def _should_ask_clarification(
+        self,
+        request: dict[str, Any],
+        task_shape: str,
+        missing_context: list[str],
+        preferred_tool: str,
+    ) -> bool:
+        if not missing_context:
+            return False
+        missing = set(str(item or "").strip() for item in missing_context if str(item or "").strip())
+        if not missing:
+            return False
+        if "file_reference" in missing or "workspace_reference" in missing:
+            return True
+        if task_shape == "high_risk_action":
+            return True
+        if task_shape in {"browser_ops", "personal_ops"}:
+            return False
+        if "path" in missing:
+            file_candidate = self._extract_named_file_candidate(str(request.get("user_text") or ""))
+            if preferred_tool == "search_files_by_name" and file_candidate:
+                return False
+            return task_shape in {"local_ops", "document_analysis", "coding_ops", "exploratory_local"}
+        return False
+
+    def _build_clarification_reply(self, request: dict[str, Any], task_shape: str, missing_context: list[str]) -> str:
+        missing = set(str(item or "").strip() for item in missing_context if str(item or "").strip())
+        file_candidate = self._extract_named_file_candidate(str(request.get("user_text") or ""))
+        if "file_reference" in missing and "workspace_reference" in missing:
+            return "Bạn đang nói tới file nào trong workspace/repo nào? Hãy gửi tên repo hoặc path file cụ thể."
+        if "workspace_reference" in missing:
+            return "Bạn muốn tôi làm trong workspace/repo nào? Hãy gửi tên repo hoặc path thư mục cụ thể."
+        if "file_reference" in missing:
+            return "Bạn muốn tôi dùng file nào? Hãy gửi path hoặc tên file cụ thể."
+        if "path" in missing and task_shape == "high_risk_action":
+            return "Tôi cần path hoặc đối tượng cụ thể trước khi làm thao tác này."
+        if "path" in missing and file_candidate:
+            return f"Bạn muốn tôi dùng file `{file_candidate}` ở thư mục nào? Hãy gửi path đầy đủ hoặc repo chứa file."
+        if "path" in missing:
+            return "Bạn muốn tôi mở file nào? Hãy gửi path hoặc tên file cụ thể."
+        if "url" in missing:
+            return "Bạn muốn tôi mở trang nào? Hãy gửi URL hoặc tên site cụ thể."
+        if "account" in missing:
+            return "Bạn muốn dùng tài khoản hoặc hộp thư nào?"
+        return "Bạn có thể nói rõ hơn một chút để tôi lấy đúng context trước khi làm tiếp không?"
 
     def _is_simple_discovery_request(self, request: dict[str, Any]) -> bool:
         user_text = str(request.get("user_text") or "").strip()
@@ -330,6 +396,19 @@ class CentralAiCoordinator:
         preferred_tool = self._infer_preferred_tool(request, task_shape)
         needs_approval = self._infer_needs_approval(request, task_shape, preferred_tool)
         codex_task_type, codex_reason, codex_why = self._infer_codex_handoff(request, task_shape, preferred_tool)
+        if self._should_ask_clarification(request, task_shape, missing_context, preferred_tool):
+            return {
+                "mode": "ask_clarification",
+                "task_shape": task_shape,
+                "confidence": 0.84,
+                "reason": "missing_context_requires_clarification",
+                "missing_context": missing_context,
+                "why_not_tool": "Thiếu context trọng yếu nên không nên tự đoán hoặc gọi tool mù.",
+                "needs_approval": needs_approval,
+                "preferred_tool": preferred_tool,
+                "codex_reason": "",
+                "codex_task_type": "",
+            }
         if task_shape == "coding_ops":
             return {
                 "mode": "escalate_to_codex",
@@ -460,13 +539,18 @@ class CentralAiCoordinator:
             decision.update({"mode": "escalate_to_codex", "reason": "central_ai_disabled", "tool_choice_confidence": 1.0})
             return decision
 
+        routing = self._decide_routing_fields(request)
+        if routing.get("mode") == "ask_clarification":
+            decision.update(routing)
+            decision["tool_choice_confidence"] = float(routing.get("confidence") or 0.75)
+            return decision
+
         mode = str(central_cfg.get("mode") or "hybrid").strip().lower()
         if mode == "codex_only":
             decision.update({"mode": "escalate_to_codex", "reason": "central_ai_mode_codex_only", "tool_choice_confidence": 1.0})
             return decision
 
         if mode == "direct_only":
-            routing = self._decide_routing_fields(request)
             decision.update(
                 {
                     **routing,
@@ -477,7 +561,6 @@ class CentralAiCoordinator:
                 }
             )
             return decision
-        routing = self._decide_routing_fields(request)
         decision.update(routing)
         decision["tool_choice_confidence"] = float(routing.get("confidence") or 0.75)
 
@@ -1501,6 +1584,36 @@ class CentralAiCoordinator:
                 "used_tools": [],
                 "trace": trace,
                 "message": "Invalid attachment.",
+            }
+
+        if decision.get("mode") == "ask_clarification":
+            reply_text = self._build_clarification_reply(
+                req,
+                str(decision.get("task_shape") or "").strip(),
+                list(decision.get("missing_context") or []),
+            )
+            trace["clarification_prompt"] = reply_text
+            if persist_turn:
+                self._persist_turn(req, reply_text, trace)
+            self._append_trace_log(
+                {
+                    "kind": "request_clarification",
+                    "request": {
+                        "channel": trace["channel"],
+                        "thread_id": str(req.get("thread_id") or ""),
+                        "user_text_preview": self._shorten(user_text, 180),
+                    },
+                    "trace": trace,
+                    "reply_preview": self._shorten(reply_text, 220),
+                }
+            )
+            return {
+                "success": True,
+                "reply_text": reply_text,
+                "artifacts": [],
+                "used_tools": [],
+                "trace": trace,
+                "message": "Clarification requested.",
             }
 
         if decision.get("mode") == "vision_direct":

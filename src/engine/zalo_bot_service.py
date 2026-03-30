@@ -581,7 +581,7 @@ class ZaloBotService:
         )
         central_route = self._central_ai.decide_route(central_request)
         central_mode = str((central_route or {}).get("mode") or "").strip().lower()
-        if central_mode in {"reply_direct", "tool_calling", "escalate_to_codex"}:
+        if central_mode in {"reply_direct", "tool_calling", "escalate_to_codex", "ask_clarification"}:
             central_result = self._central_ai.handle_request(
                 central_request,
                 persist_turn=False,

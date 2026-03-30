@@ -70,5 +70,17 @@
     "expected_mode": "tool_calling",
     "expected_task_shape": "exploratory_local",
     "notes": "Sprint 10 dùng list_local_files cho case discovery read-only đơn giản."
+  },
+  {
+    "user_text": "Kiểm tra project này đang lỗi gì",
+    "expected_mode": "escalate_to_codex",
+    "expected_task_shape": "coding_ops",
+    "notes": "Case điều tra lỗi trong project phải đi Codex chủ động."
+  },
+  {
+    "user_text": "Mở file đó",
+    "expected_mode": "ask_clarification",
+    "expected_task_shape": "local_ops",
+    "notes": "Thiếu context nghiêm trọng nên hỏi lại ngắn gọn thay vì đoán bừa."
   }
 ]

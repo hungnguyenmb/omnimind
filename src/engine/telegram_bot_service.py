@@ -1936,7 +1936,7 @@ class TelegramBotService:
             )
             central_ai_route = self._central_ai.decide_route(central_ai_request)
             central_ai_mode = str((central_ai_route or {}).get("mode") or "").strip().lower()
-            if central_ai_mode in {"reply_direct", "tool_calling", "escalate_to_codex"}:
+            if central_ai_mode in {"reply_direct", "tool_calling", "escalate_to_codex", "ask_clarification"}:
                 draft_id = None
                 try:
                     draft_id = transport.send_message(chat_id, "🤔 OmniMind đang xử lý...")

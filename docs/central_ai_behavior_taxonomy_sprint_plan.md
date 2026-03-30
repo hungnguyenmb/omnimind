@@ -144,6 +144,8 @@ Trạng thái cập nhật ngày `2026-03-14`:
 - `CodexRuntimeBridge` đã nhận `request_context` để phát `codex_handoff` event.
 - Telegram/Zalo đã gọi luôn nhánh `escalate_to_codex` của `CentralAiCoordinator`, thay vì bỏ qua coordinator rồi đi legacy flow ngay từ đầu.
 - Đã thêm script kiểm tra `scripts/test_codex_routing_policy.py`.
+- Đã thêm mode `ask_clarification` tối thiểu cho các case thiếu context nghiêm trọng như `mở file đó`.
+- Telegram/Zalo đã nhận cùng mode route từ `CentralAiCoordinator`, gồm cả `ask_clarification`.
 - Kết quả route test nội bộ:
   - `hãy tìm tất cả file config telegram rồi tóm tắt` -> `escalate_to_codex`
   - `xem repo này đang có gì` -> `escalate_to_codex`
@@ -154,9 +156,10 @@ Trạng thái cập nhật ngày `2026-03-14`:
   - `liệt kê file .md trong docs` -> `tool_calling`
   - `repo hiện tại là gì` -> `tool_calling`
   - `tìm file WORKING_PRINCIPLES` -> `tool_calling`
+  - `mở file đó` -> `ask_clarification`
 - Phần còn lại:
   - cần E2E thật trên Telegram/Zalo cho ít nhất 1 case discovery đơn giản và 1 case coding/exploratory
-  - clarification policy riêng vẫn thuộc Sprint 13
+  - clarification policy đầy đủ theo session focus vẫn thuộc Sprint 13
 
 ---
 

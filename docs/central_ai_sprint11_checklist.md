@@ -1,6 +1,6 @@
 # Checklist Sprint 11 - Codex Role Formalization
 
-Ngày cập nhật: `2026-03-14`
+Ngày cập nhật: `2026-03-30`
 
 Tài liệu này chi tiết hóa `Sprint 11 - Codex Role Formalization` trong:
 - `docs/central_ai_behavior_taxonomy_sprint_plan.md`
@@ -34,6 +34,7 @@ Sprint này chưa làm:
 ### Tạo mới
 - [docs/central_ai_sprint11_checklist.md](/Users/admin/hungnm/work/freelancer/project/antigravity-workspace/projects/omnimind/docs/central_ai_sprint11_checklist.md)
 - [scripts/test_codex_routing_policy.py](/Users/admin/hungnm/work/freelancer/project/antigravity-workspace/projects/omnimind/scripts/test_codex_routing_policy.py)
+- [scripts/test_channel_route_consistency.py](/Users/admin/hungnm/work/freelancer/project/antigravity-workspace/projects/omnimind/scripts/test_channel_route_consistency.py)
 
 ### Cập nhật
 - [src/engine/central_ai_coordinator.py](/Users/admin/hungnm/work/freelancer/project/antigravity-workspace/projects/omnimind/src/engine/central_ai_coordinator.py)
@@ -68,11 +69,11 @@ Sprint này chưa làm:
 - [x] Bổ sung rule rõ cho các nhóm sau:
 - [x] `tìm file rồi đọc/tóm tắt nhiều file`
 - [x] `xem repo này có gì`
-- [ ] `kiểm tra project này đang lỗi gì`
+- [x] `kiểm tra project này đang lỗi gì`
 - [x] `debug`
 - [x] `sửa code`
 - [x] `chạy test`
-- [ ] `tìm tất cả chỗ dùng X trong repo`
+- [x] `tìm tất cả chỗ dùng X trong repo`
 
 ### 3.3 Decision trace và contract
 
@@ -95,9 +96,9 @@ Sprint này chưa làm:
 - [x] không trả lời kiểu “em chưa làm được”
 - [x] ưu tiên escalate sang Codex
 
-- [ ] Nếu thiếu context nghiêm trọng:
-- [ ] có thể hỏi lại ngắn gọn
-- [ ] chỉ hỏi lại khi thật sự cần, không hỏi lại vô ích
+- [x] Nếu thiếu context nghiêm trọng:
+- [x] có thể hỏi lại ngắn gọn
+- [x] chỉ hỏi lại khi thật sự cần, không hỏi lại vô ích
 
 - [x] Nếu Codex path fail:
 - [x] trace phải nói rõ là fail ở đâu
@@ -107,7 +108,7 @@ Sprint này chưa làm:
 
 - [x] Telegram dùng Codex như executor chính thức cho exploratory/coding cases.
 - [x] Zalo dùng cùng policy route như Telegram.
-- [ ] Không để chênh lệch hành vi quá lớn giữa 2 kênh.
+- [x] Không để chênh lệch hành vi quá lớn giữa 2 kênh.
 - [x] Metadata lưu memory cần có `central_ai_trace` và dấu vết route sang Codex.
 
 ### 3.6 Prompt và handoff sang Codex
@@ -149,16 +150,24 @@ Kết quả cập nhật ngày `2026-03-14`:
 - `CodexRuntimeBridge` đã nhận `request_context` và phát `codex_handoff` event.
 - Telegram/Zalo đã gọi nhánh `escalate_to_codex` của `CentralAiCoordinator`, không còn bỏ qua coordinator khi route sang Codex.
 - Đã thêm script kiểm tra `scripts/test_codex_routing_policy.py`.
+- Cập nhật ngày `2026-03-30`:
+  - `CentralAiCoordinator` đã thêm mode `ask_clarification` chạy thật cho các case thiếu context nghiêm trọng như `mở file đó`.
+  - Rule route cho `kiểm tra project này đang lỗi gì` và `tìm tất cả chỗ dùng X trong repo` đã được khóa bằng regression script.
+  - Telegram/Zalo đều nhận và xử lý thống nhất mode `ask_clarification`.
+  - Đã thêm script `scripts/test_channel_route_consistency.py` để kiểm tra parity route giữa `ui`, `telegram`, `zalo`.
 - Kết quả route test nội bộ:
   - `hãy tìm tất cả file config telegram rồi tóm tắt` -> `escalate_to_codex`
   - `xem repo này đang có gì` -> `escalate_to_codex`
   - `debug lỗi này trong project OmniMind` -> `escalate_to_codex`
   - `sửa file config để bật bot` -> `escalate_to_codex`
   - `chạy test rồi báo lỗi` -> `escalate_to_codex`
+  - `kiểm tra project này đang lỗi gì` -> `escalate_to_codex`
+  - `tìm tất cả chỗ dùng ConfigManager trong repo` -> `escalate_to_codex`
   - `bạn đang làm việc trong workspace nào` -> `tool_calling`
   - `liệt kê file .md trong docs` -> `tool_calling`
   - `repo hiện tại là gì` -> `tool_calling`
   - `tìm file WORKING_PRINCIPLES` -> `tool_calling`
+  - `mở file đó` -> `ask_clarification`
 
 ---
 
